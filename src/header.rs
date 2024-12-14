@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering::*};
 
+use crate::USIZELEN;
+
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub(crate) struct Header(*mut AtomicUsize);
 pub(crate) struct Guard(&'static AtomicUsize);
@@ -33,11 +35,23 @@ impl Header {
     }
 
     pub(crate) fn distance(&self, end: &Self) -> usize {
+        if self >= end {
+            println!("NEGATIVE distance!!!!!!!!!!!!!!");
+        }
         (unsafe { end.0.offset_from(self.0) }) as usize - 1
     }
 
     pub(crate) fn inner(self) -> *mut usize {
         self.0 as *mut usize
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        let end = self.next();
+        self.distance(&end) * USIZELEN
+    }
+
+    pub(crate) fn buffer(&self) -> *mut u8 {
+        (unsafe { self.0.add(1) }) as *mut u8
     }
 }
 

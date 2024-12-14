@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, mem::transmute, time::Instant};
+use std::{collections::VecDeque, io::Write, mem::transmute, time::Instant};
 
 use crate::{
     header::{Guard, Header},
@@ -102,7 +102,7 @@ fn test_continious_alloc() {
     let mut allocations = VecDeque::<Guard>::with_capacity(4);
     for i in 0..ITERS {
         let size = (unsafe { transmute::<Instant, (u64, u64)>(Instant::now()) }.0 * i) % 256;
-        let header = ringal.alloc((size as usize).max(MINALLOC * USIZELEN));
+        let header = ringal.alloc(size as usize);
         assert!(header.is_some(), "should always have capacity");
         let header = header.unwrap();
         header.set();
@@ -110,6 +110,92 @@ fn test_continious_alloc() {
         if allocations.len() == 4 {
             allocations.pop_front();
             allocations.pop_front();
+        }
+    }
+}
+
+#[test]
+fn test_ext_buf_alloc() {
+    let (mut ringal, _g) = setup!();
+    const MSG: &[u8] = b"message";
+    const ITERS: usize = (SIZE - USIZELEN * 2) / MSG.len();
+    let writer = ringal.extendable(1024);
+    assert!(
+        writer.is_some(),
+        "new allocator should have the capacity for ext buf"
+    );
+    let mut writer = writer.unwrap();
+
+    for _ in 0..ITERS {
+        let result = writer.write(MSG);
+        assert!(
+            result.is_ok() && result.unwrap() == MSG.len(),
+            "exlusively owned allocator should extend"
+        );
+    }
+}
+
+#[test]
+fn test_ext_buf_multi_alloc() {
+    let (mut ringal, _g) = setup!();
+    const MSG: &[u8] = b"70aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ITERS: usize = (SIZE - USIZELEN) / (MSG.len() + USIZELEN);
+    let mut buffers = Vec::with_capacity(ITERS);
+    for _ in 0..ITERS {
+        let writer = ringal.extendable(MSG.len());
+        assert!(
+            writer.is_some(),
+            "allocator has just enough capacity for all iterations"
+        );
+        let mut writer = writer.unwrap();
+        let result = writer.write(MSG);
+        assert!(
+            result.is_ok() && result.unwrap() == MSG.len(),
+            "buffer should have exact capacity for MSG"
+        );
+        buffers.push(writer.finilize());
+    }
+    let writer = ringal.extendable(MSG.len());
+    assert!(writer.is_none(), "allocator should be exhausted after loop");
+    drop(writer);
+    buffers.clear();
+    let writer = ringal.extendable(MSG.len());
+    assert!(
+        writer.is_some(),
+        "allocator should have full capacity after clear"
+    );
+}
+
+#[test]
+fn test_ext_buf_continuous_alloc() {
+    let (mut ringal, _g) = setup!();
+    let mut string = Vec::<u8>::new();
+    let mut buffers = VecDeque::with_capacity(4);
+    const ITERS: usize = 8192;
+    for i in 0..ITERS {
+        let random = unsafe { transmute::<Instant, (usize, usize)>(Instant::now()).0 };
+        let mut size = (random * i) % 256;
+        if size < MINALLOC * USIZELEN {
+            size = 256 - size
+        };
+        println!("{i} -> {size}");
+        string.clear();
+        string.extend(std::iter::repeat_n(b'a', size));
+        let writer = ringal.extendable(128);
+        assert!(
+            writer.is_some(),
+            "allocator should never run out of capacity"
+        );
+        let mut writer = writer.unwrap();
+        let result = writer.write(string.as_slice());
+        assert!(
+            result.is_ok() && result.unwrap() == string.len(),
+            "allocator should have extra capacity for extension"
+        );
+        buffers.push_back(writer.finilize());
+        if buffers.len() == 4 {
+            buffers.pop_front();
+            buffers.pop_front();
         }
     }
 }

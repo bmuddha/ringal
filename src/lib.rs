@@ -1,3 +1,4 @@
+use buffer::ExtBuf;
 use header::Header;
 
 pub struct RingAl {
@@ -26,9 +27,19 @@ impl RingAl {
         Self { head }
     }
 
+    pub fn extendable(&mut self, size: usize) -> Option<ExtBuf<'_>> {
+        let header = self.alloc(size)?;
+        header.set();
+        Some(ExtBuf {
+            header,
+            initialized: 0,
+            ringal: self,
+            finalized: false,
+        })
+    }
+
     fn alloc(&mut self, mut size: usize) -> Option<Header> {
-        size = size / USIZELEN + (size % USIZELEN != 0) as usize;
-        (size >= MINALLOC).then_some(())?;
+        size = (size / USIZELEN + (size % USIZELEN != 0) as usize).max(MINALLOC);
         let mut start = Header::new(self.head);
         let mut accumulated = 0;
         let mut next = start;
@@ -47,14 +58,15 @@ impl RingAl {
             self.head = next.inner();
         } else {
             self.head = unsafe { start.inner().add(size + 1) };
-            start.store(self.head);
             let head = Header::new(self.head);
             head.store(next.inner());
         }
+        start.store(self.head);
         Some(start)
     }
 }
 
+mod buffer;
 mod header;
 #[cfg(test)]
 mod tests;
