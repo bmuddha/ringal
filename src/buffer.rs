@@ -1,6 +1,7 @@
 use std::{
     io::{self, Write},
     ops::{Deref, DerefMut},
+    sync::Arc,
 };
 
 use crate::{
@@ -41,6 +42,9 @@ impl ExtBuf<'_> {
 
 impl Write for ExtBuf<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         let available = self.header.capacity() - self.initialized;
         let count = buf.len();
         if available >= count {
@@ -57,7 +61,6 @@ impl Write for ExtBuf<'_> {
         if header < self.header {
             let ptr = self.header.buffer();
             let old = unsafe { std::slice::from_raw_parts(ptr, self.initialized) };
-            println!("wrapped, copying from {ptr:p} to {:p}", header.inner());
             let _guard = Guard::from(self.header);
             self.header = header;
             self.header.set();
@@ -85,12 +88,19 @@ impl Drop for ExtBuf<'_> {
 }
 
 pub struct FixedBufMut {
-    _guard: Guard,
-    inner: &'static mut [u8],
-    initialized: usize,
+    pub(crate) _guard: Guard,
+    pub(crate) inner: &'static mut [u8],
+    pub(crate) initialized: usize,
 }
 
 impl FixedBufMut {
+    pub fn freeze(self) -> FixedBuf {
+        FixedBuf {
+            _rc: Arc::new(self._guard),
+            inner: &self.inner[..self.initialized],
+        }
+    }
+
     pub fn spare(&self) -> usize {
         self.inner.len() - self.initialized
     }
@@ -112,11 +122,31 @@ impl DerefMut for FixedBufMut {
 
 impl Write for FixedBufMut {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let _ = buf;
-        todo!()
+        let tocopy = self.spare().min(buf.len());
+        let src = buf.as_ptr();
+        unsafe {
+            let uninit = self.inner.get_unchecked_mut(self.initialized..);
+            uninit.as_mut_ptr().copy_from_nonoverlapping(src, tocopy);
+        }
+        self.initialized += tocopy;
+        Ok(tocopy)
     }
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct FixedBuf {
+    _rc: Arc<Guard>,
+    inner: &'static [u8],
+}
+
+impl Deref for FixedBuf {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.inner
     }
 }

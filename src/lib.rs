@@ -1,4 +1,4 @@
-use buffer::ExtBuf;
+use buffer::{ExtBuf, FixedBufMut};
 use header::Header;
 
 pub struct RingAl {
@@ -25,6 +25,19 @@ impl RingAl {
         unsafe { *tail = (head as usize) << 1 };
 
         Self { head }
+    }
+
+    pub fn fixed(&mut self, size: usize) -> Option<FixedBufMut> {
+        let header = self.alloc(size)?;
+        header.set();
+        let ptr = header.buffer();
+        let capacity = header.capacity();
+        let inner = unsafe { std::slice::from_raw_parts_mut(ptr, capacity) };
+        Some(FixedBufMut {
+            inner,
+            initialized: 0,
+            _guard: header.into(),
+        })
     }
 
     pub fn extendable(&mut self, size: usize) -> Option<ExtBuf<'_>> {

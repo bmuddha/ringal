@@ -178,7 +178,6 @@ fn test_ext_buf_continuous_alloc() {
         if size < MINALLOC * USIZELEN {
             size = 256 - size
         };
-        println!("{i} -> {size}");
         string.clear();
         string.extend(std::iter::repeat_n(b'a', size));
         let writer = ringal.extendable(128);
@@ -193,6 +192,97 @@ fn test_ext_buf_continuous_alloc() {
             "allocator should have extra capacity for extension"
         );
         buffers.push_back(writer.finilize());
+        if buffers.len() == 4 {
+            buffers.pop_front();
+            buffers.pop_front();
+        }
+    }
+}
+
+#[test]
+fn test_fixed_buf_alloc() {
+    let (mut ringal, _g) = setup!();
+    const MSG: &[u8] = b"message to be written";
+    let buffer = ringal.fixed(MSG.len());
+    assert!(
+        buffer.is_some(),
+        "new allocator should have the capacity for fixed buf"
+    );
+    let mut buffer = buffer.unwrap();
+
+    let result = buffer.write(MSG);
+    assert!(
+        result.is_ok() && result.unwrap() == MSG.len(),
+        "fixed buffer write should never error"
+    );
+    assert_eq!(
+        buffer.len(),
+        MSG.len(),
+        "fixed buffer len should be equal to that of written message"
+    );
+    assert_eq!(
+        buffer.spare(),
+        MINALLOC * USIZELEN - MSG.len(),
+        "fixed buffer should have some spare capacity left after write"
+    );
+}
+
+#[test]
+fn test_fixed_buf_multi_alloc() {
+    let (mut ringal, _g) = setup!();
+    const MSG: &[u8] = b"70aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ITERS: usize = (SIZE - USIZELEN) / (MSG.len() + USIZELEN);
+    let mut buffers = Vec::with_capacity(ITERS);
+    for _ in 0..ITERS {
+        let buffer = ringal.fixed(MSG.len());
+        assert!(
+            buffer.is_some(),
+            "allocator has just enough capacity for all iterations"
+        );
+        let mut buffer = buffer.unwrap();
+        let result = buffer.write(MSG);
+        assert!(
+            result.is_ok() && result.unwrap() == MSG.len(),
+            "fixed buffer should always write without error"
+        );
+        buffers.push(buffer);
+    }
+    let buffer = ringal.fixed(MSG.len());
+    assert!(buffer.is_none(), "allocator should be exhausted after loop");
+    buffers.clear();
+    let buffer = ringal.fixed(MSG.len());
+    assert!(
+        buffer.is_some(),
+        "allocator should have full capacity after clear"
+    );
+}
+
+#[test]
+fn test_fixed_buf_continuous_alloc() {
+    let (mut ringal, _g) = setup!();
+    let mut string = Vec::<u8>::new();
+    let mut buffers = VecDeque::with_capacity(4);
+    const ITERS: usize = 8192;
+    for i in 0..ITERS {
+        let random = unsafe { transmute::<Instant, (usize, usize)>(Instant::now()).0 };
+        let mut size = (random * i) % 256;
+        if size < MINALLOC * USIZELEN {
+            size = 256 - size
+        };
+        string.clear();
+        string.extend(std::iter::repeat_n(b'a', size));
+        let buffer = ringal.fixed(string.len());
+        assert!(
+            buffer.is_some(),
+            "allocator should never run out of capacity"
+        );
+        let mut buffer = buffer.unwrap();
+        let result = buffer.write(string.as_slice());
+        assert!(
+            result.is_ok() && result.unwrap() == string.len(),
+            "fixed buffer should never error on write"
+        );
+        buffers.push_back(buffer);
         if buffers.len() == 4 {
             buffers.pop_front();
             buffers.pop_front();
