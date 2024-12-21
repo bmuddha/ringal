@@ -1,11 +1,14 @@
-use std::{collections::VecDeque, io::Write, mem::transmute, time::Instant};
+use std::{
+    collections::VecDeque, io::Write, mem::transmute, sync::mpsc::sync_channel, time::Instant,
+};
 
 use crate::{
+    buffer::FixedBuf,
     header::{Guard, Header},
     RingAl, MINALLOC, USIZELEN,
 };
 
-const SIZE: usize = 2048;
+const SIZE: usize = 4096;
 
 struct IntegrityGuard {
     start: *mut usize,
@@ -153,7 +156,7 @@ fn test_ext_buf_multi_alloc() {
             result.is_ok() && result.unwrap() == MSG.len(),
             "buffer should have exact capacity for MSG"
         );
-        buffers.push(writer.finilize());
+        buffers.push(writer.finalize());
     }
     let writer = ringal.extendable(MSG.len());
     assert!(writer.is_none(), "allocator should be exhausted after loop");
@@ -191,7 +194,7 @@ fn test_ext_buf_continuous_alloc() {
             result.is_ok() && result.unwrap() == string.len(),
             "allocator should have extra capacity for extension"
         );
-        buffers.push_back(writer.finilize());
+        buffers.push_back(writer.finalize());
         if buffers.len() == 4 {
             buffers.pop_front();
             buffers.pop_front();
@@ -286,6 +289,49 @@ fn test_fixed_buf_continuous_alloc() {
         if buffers.len() == 4 {
             buffers.pop_front();
             buffers.pop_front();
+        }
+    }
+}
+
+#[test]
+fn test_fixed_buf_continuous_alloc_multi_thread() {
+    let (mut ringal, _g) = setup!();
+    let mut string = Vec::<u8>::new();
+    let mut threads = Vec::with_capacity(4);
+    const ITERS: usize = 8192;
+    for i in 0..4 {
+        let (tx, rx) = sync_channel::<FixedBuf>(2);
+        std::thread::spawn(move || {
+            let mut number = 0;
+            while let Ok(s) = rx.recv() {
+                number += s.len() * i;
+            }
+            number
+        });
+        threads.push(tx);
+    }
+    for i in 0..ITERS {
+        let random = unsafe { transmute::<Instant, (usize, usize)>(Instant::now()).0 };
+        let mut size = (random * i) % 256;
+        if size < MINALLOC * USIZELEN {
+            size = 256 - size
+        };
+        string.clear();
+        string.extend(std::iter::repeat_n(b'a', size));
+        let buffer = ringal.fixed(string.len());
+        assert!(
+            buffer.is_some(),
+            "allocator should never run out of capacity"
+        );
+        let mut buffer = buffer.unwrap();
+        let result = buffer.write(string.as_slice());
+        assert!(
+            result.is_ok() && result.unwrap() == string.len(),
+            "fixed buffer should never error on write"
+        );
+        let buffer = buffer.freeze();
+        for tx in &mut threads {
+            tx.send(buffer.clone()).unwrap();
         }
     }
 }

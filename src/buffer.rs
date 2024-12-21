@@ -9,6 +9,7 @@ use crate::{
     RingAl,
 };
 
+/// todo
 pub struct ExtBuf<'a> {
     pub(crate) header: Header,
     pub(crate) initialized: usize,
@@ -17,7 +18,8 @@ pub struct ExtBuf<'a> {
 }
 
 impl ExtBuf<'_> {
-    pub fn finilize(mut self) -> FixedBufMut {
+    /// todo
+    pub fn finalize(mut self) -> FixedBufMut {
         let capacity = self.header.capacity();
         let ptr = self.header.buffer();
         let inner = unsafe { std::slice::from_raw_parts_mut(ptr, capacity) };
@@ -87,13 +89,16 @@ impl Drop for ExtBuf<'_> {
     }
 }
 
+///f afsf
 pub struct FixedBufMut {
     pub(crate) _guard: Guard,
     pub(crate) inner: &'static mut [u8],
     pub(crate) initialized: usize,
 }
 
+/// todo
 impl FixedBufMut {
+    /// todo
     pub fn freeze(self) -> FixedBuf {
         FixedBuf {
             _rc: Arc::new(self._guard),
@@ -101,6 +106,7 @@ impl FixedBufMut {
         }
     }
 
+    /// todo
     pub fn spare(&self) -> usize {
         self.inner.len() - self.initialized
     }
@@ -137,6 +143,7 @@ impl Write for FixedBufMut {
     }
 }
 
+/// todo
 #[derive(Clone)]
 pub struct FixedBuf {
     _rc: Arc<Guard>,
