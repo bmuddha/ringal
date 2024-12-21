@@ -88,3 +88,10 @@ a ring structure.
    becomes available again. The creation of this buffer type involves one extra
    allocation from heap (for reference counter) and thus shuld be avoided if no
    cloning is needed.
+
+# Safety
+This library is absolutely safe! Wish I could say that, but alas it's riddled
+with unsafe, more than that it doesn't even look like Rust at times, more like
+C, with raw pointer arithmetic all over the place. But jokes aside, a lot of
+effort was put into making sure that the safe API which crate exposes is indeed
+safe to use and doesn't lead to UBs and other dreadful things.
