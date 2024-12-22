@@ -335,3 +335,36 @@ fn test_fixed_buf_continuous_alloc_multi_thread() {
         }
     }
 }
+
+#[cfg(feature = "tls")]
+#[test]
+fn test_thread_local_allocator() {
+    use crate::ringal;
+    ringal!(@init, 8899);
+    let fixed = ringal!(@fixed, 944);
+    assert!(fixed.is_some());
+    const MSG: &[u8] = b"long message with some extra text";
+    const MSGLEN: usize = MSG.len();
+    let extended = ringal!(@ext, 256, |mut writer| {
+        let result = writer.write(MSG);
+        assert!(matches!(result, Ok(MSGLEN)));
+        writer.finalize()
+    });
+    assert!(extended.is_some());
+    assert_eq!(extended.unwrap().len(), MSGLEN);
+    // functions cannot capture variable in outer scope, but they still have access to TLS
+    fn some_fn() {
+        let fixed = ringal!(@fixed, 944);
+        assert!(fixed.is_some());
+        const MSG: &[u8] = b"long message with some extra text";
+        const MSGLEN: usize = MSG.len();
+        let extended = ringal!(@ext, 256, |mut writer| {
+            let result = writer.write(MSG);
+            assert!(matches!(result, Ok(MSGLEN)));
+            writer.finalize()
+        });
+        assert!(extended.is_some());
+        assert_eq!(extended.unwrap().len(), MSGLEN);
+    }
+    some_fn();
+}

@@ -1,57 +1,65 @@
-# About
-RingAl - ring allocator, this crate provides fast, cheap and efficient
-allocations for short lived buffers. The key point here is short lived, as
-allocation happen in circular fashion, and long lived allocations will simply
-jam the allocator making it unusable.
+# RingAl - Efficient Ring Allocator for Short-lived Buffers
 
-Main use case:
-1. Preallocate backing store of size N bytes
-2. Allocate small buffers from backing store of size M < N
-3. Make use of buffer, send it to other threads if necessary, cheaply clone it
-   (just like Arc)
-4. Drop the buffer before the allocator wraps around the ring to the same
-   memory region
-5. When buffer is dropped, the backing store becomes available for new
-   allocations
+[![Crates.io](https://img.shields.io/crates/v/ringal.svg)](https://crates.io/crates/ringal)
+[![Documentation](https://docs.rs/ringal/badge.svg)](https://docs.rs/ringal)
+[![Build Status](https://github.com/yourusername/ringal/workflows/CI/badge.svg)](https://github.com/yourusername/ringal/actions)
 
-# Design
-The key feature of RingAl is a dynamic and self describing backing store, which
-constantly evolves its own structure as program runs. This dynamic nature is
-made possible by guard sequences which appear, change and disappear to
-accomadate various allocation requests. The implentation is quite simple, it
-uses a single usize pointer which points to memory guard. The guard is only
-ever accessed using atomic CPU instructions, this allows for allocated buffers
-to be used in a multithreaded environments, for a small access overhead.
-Although it should be noted that allocator itsefl is not `Sync` and cannot be
-accessed concurrently from different threads.
+## Overview
 
-Each guard contains two pieces of information:
-1. Indicator flag of whether or not the guarded memory region is in use
-2. Address of the next guard in backing store
+**RingAl** is a highly efficient ring allocator designed specifically for the
+allocation of short-lived buffers. The allocator operates in a circular manner,
+which allows for fast and inexpensive buffer allocations, provided they are
+ephemeral in nature. It is crucial that these allocations are short-lived;
+otherwise, the allocator may become clogged with long-lived allocations,
+rendering it inefficient.
 
-When allocation request is made, the RingAl checks current guard (wherever in
-backing store that might be at present moment), then 4 outcomes are possible:
-1. Guard is guarding memory region of requested size, ideal scenario, the guard
-   is just marked as taken, pointer is shifted to next guard , and buffer
-   containing the guarded memory region is returned
-2. Guard is guarding memory region larger than requested size, the allocator
-   splits the guarded region into that of `requested` size and the rest,
-   creates a new guard at the start of `rest`, shifts the pointer to newly
-   created guard and returns the buffer with `requested` region. This scenario
-   leads to fragmentation of backing store.
-3. Guard is guarding memory region smaller than requested size, the allocator
-   jumps to next guard, adds its size to currently accumulated buffer size. If
-   the accumulated buffer size is larger or equal to requested one, than we
-   stop and returned merged memory buffers, otherwise we keep consuming other
-   guards until we get the size we want. Only first guard survives this
-   process, other guards effectively become part of usable buffer and thus are
-   removed. This scenario leads to defragmentation of backing store.
-4. Guard is guarding memory region smaller than requested size, but after
-   merging all the available memory regions the allocator cannot accumulate
-   enough buffer size to accomadate allocation request, in this scenario the
-   allocation simply fails, and `None` is returned to caller.
+### Primary Use Case:
 
-```
+1. **Preallocation**: Establish a backing store of size `N` bytes.
+2. **Small Buffer Allocation**: Allocate buffers from the backing store, where
+   `M < N`.
+3. **Buffer Utilization**: Use the allocated buffer across threads if
+   necessary. Buffers can be cloned efficiently, akin to using an `Arc`.
+4. **Timely Deallocation**: Ensure buffers are dropped before the allocator
+   cycles back to the same memory region.
+5. **Recycled Storage**: Upon buffer deallocation, the backing store becomes
+   available for subsequent allocations.
+
+## Design Philosophy
+
+RingAl's core strength lies in its dynamic and self-descriptive backing store,
+which adapts to various allocation demands through guard sequences. These
+sequences dynamically emerge, alter, and disappear to facilitate different
+allocation requests. The implementation leverages a single `usize` pointer to
+manage memory guards, exclusively employing atomic CPU instructions for access.
+This enables safe multithreaded buffer usage while incurring minimal access
+overhead. Notably, the allocator itself is not `Sync` and cannot be accessed
+concurrently by multiple threads.
+
+### Guard Insights:
+
+Each guard encodes:
+1. A flag indicating whether the guarded memory region is in use.
+2. The address of the next guard in the backing store.
+
+### Allocation Scenarios:
+
+When an allocation request is made, RingAl assesses the current guard, which
+can result in one of four scenarios:
+
+1. **Exact Fit**: The requested size matches the guarded region. The guard is
+   marked as occupied, the pointer shifts to the next guard, and the buffer is
+   returned.
+2. **Oversized Guard**: The guarded region exceeds the requested size. The
+   region is split, a new guard is established for the remainder, and the
+   buffer of the requested size is returned. This can lead to fragmentation.
+3. **Undersized Guard**: The guarded region is smaller than required. The
+   allocator proceeds to merge subsequent regions until the requested size is
+   met, effectively defragmenting the storage. Only the initial guard persists.
+4. **Insufficient Capacity**: Even after merging, the accumulated buffer is
+   insufficient. The allocation fails, returning `None`.
+
+```plaintext
    allocator
       |
       v
@@ -61,37 +69,80 @@ backing store that might be at present moment), then 4 outcomes are possible:
      |                    ^   |              ^   |              ^ |          ^ 
      |                    |   |              |   |              | |          |
      ----------------------   ----------------   ---------------- ------------
-
+     ^                                                                       |
+     |                                                                       |
+     -------------------------------------------------------------------------
 ```
 
-_Notes_: `head` and `tail` canaries are regular guard sequences, but they never
-disappear, in addition, tail canary always points to head canary, thus forming
-a ring structure.
+_*Note*_: `Head` and `Tail` canaries are standard guard sequences that persist, with the `Tail` canary perpetually pointing to the `Head`, forming a circular structure.
 
-# Features
-1. Dynamic fragmentation/defragmentation of backing store, that facilitate
-   variable size allocations.
-2. Extendable buffers: if the caller doesn't know in advance the exact size of
-   required allocation, extendable buffers allow for dynamic reallocations,
-   just like `Vec<u8>`, but unlike `Vec`, this type of reallocation is usually
-   very cheap, as it involves a few pointer arithmetic operations and no data
-   cloning. Due to limited capacity of backing store such reallocations might
-   fail if the capacity is exhausted.
-3. Fixed size buffers: as the name suggest, this type of buffer cannot be
-   grown, but is more efficient than extendable one due to simpler
-   implementation. This type of buffer can be safely sent to other threads. The
-   Drop implementation will automatically take care of making its backing store
-   available for future allocations once the buffer is not longer needed.
-4. Read only buffers: fixed size buffers which can be cheaply cloned (one
-   atomic addition) and sent to multiple threads. Drop implementation will make
-   sure that once all references to buffer are dropped, the backing store
-   becomes available again. The creation of this buffer type involves one extra
-   allocation from heap (for reference counter) and thus shuld be avoided if no
-   cloning is needed.
+## Features
+
+1. **Dynamic Fragmentation and Defragmentation**: Facilitates variable-size
+   allocations through adaptive backing store management.
+2. **Extendable Buffers**: Allow dynamic reallocations akin to `Vec<u8>`,
+   typically inexpensive due to minimal pointer arithmetic and no data copy.
+   Such reallocations may fail if capacity limits are reached.
+3. **Fixed-Size Buffers**: Unexpandable but more efficient due to simpler
+   design, with safe cross-thread transportation. They make storage available
+   upon deallocation.
+4. **Read-Only Buffers**: Fixed-size buffers that are easily cloneable and
+   distributable across multiple threads. These involve an additional heap
+   allocation for a reference counter and should be avoided unless necessary to
+   prevent overhead.
+
+For more details, visit the [RingAl Documentation](https://docs.rs/ringal).
+
+## Optional Crate Features (Cargo)
+1. **`tls` (Thread-Local Storage):** This feature enables advanced
+   functionalities related to thread-local storage within the allocator. By
+   activating `tls`, developers can initiate allocation requests from any point
+   in the codebase, thereby eliminating the cumbersome need to pass the
+   allocator instance explicitly. This enhancement streamlines code ergonomics,
+   albeit with a slight performance trade-off due to the utilization of
+   `RefCell` for managing thread-local data.
+2. **`drop` (Allocator Deallocation):** Typically, the allocator is designed to
+   remain active for the duration of the application's execution. However, in
+   scenarios where early deallocation of the allocator and its associated
+   resources is required, activating the `drop` feature is essential. This
+   feature implements a tailored `Drop` mechanism that suspends the executing
+   thread until all associated allocations are conclusively released,
+   subsequently deallocating the underlying storage. It is critical to ensure
+   allocations do not extend significantly beyond the intended drop point.
+   Failure to enable this feature will result in a memory leak upon
+   attempting to drop the allocator.
+
+## Usage examples
+### Extendable buffer
+```rust
+let mut allocator = RingAl::new(1024); // Create an allocator with initial size
+let mut buffer = allocator.extendable(64).unwrap();
+// the slice length exceeds preallocated capacity of 64
+let msg = b"hello world, this message is longer than allocated capacity, but buffer will
+grow as needed during the write, provided that allocator still has necessary capacity";
+// but we're still able to write the entire message, as the buffer grows dynamically
+let size = buffer.write(msg).unwrap();
+let fixed = buffer.finalize();
+assert_eq!(fixed.as_ref(), msg);
+assert_eq!(fixed.len(), size);
+```
+### Fixed buffer
+```rust
+let mut allocator = RingAl::new(1024); // Create an allocator with initial size
+let mut buffer = allocator.fixed(256).unwrap();
+let size = buffer.write(b"hello world, this message is relatively short").unwrap();
+assert_eq!(buffer.len(), size);
+assert_eq!(buffer.spare(), 256 - size);
+```
+### Multi-threaded environment
+```rust
+```
 
 # Safety
-This library is absolutely safe! Wish I could say that, but alas it's riddled
-with unsafe, more than that it doesn't even look like Rust at times, more like
-C, with raw pointer arithmetic all over the place. But jokes aside, a lot of
-effort was put into making sure that the safe API which crate exposes is indeed
-safe to use and doesn't lead to UBs and other dreadful things.
+This library is the epitome of cautious engineering! Well, that's what we'd
+love to claim, but the truth is it's peppered with `unsafe` blocks. At times,
+it seems like the code is channeling its inner C spirit, with raw pointer
+arithmetic lurking around every corner. But in all seriousness, considerable
+effort has been devoted to ensuring that the safe API exposed by this crate is
+truly safe for users and doesn't invite any unwelcome Undefined Behaviors or
+other nefarious calamities. Proceed with confidence...

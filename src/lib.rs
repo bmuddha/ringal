@@ -138,6 +138,59 @@ impl RingAl {
     }
 }
 
+/// initialize thread local allocator
+#[cfg(any(feature = "tls", test))]
+#[macro_export]
+macro_rules! ringal {
+    (@init, $capacity: expr) => {
+        use std::cell::RefCell;
+        thread_local! {
+            pub static RINGAL: RefCell<RingAl> = RefCell::new(RingAl::new($capacity));
+        }
+    };
+    (@fixed, $capacity: expr) => {
+        RINGAL.with_borrow_mut(|ringal| ringal.fixed($capacity))
+    };
+    (@ext, $capacity: expr, $cb: expr) => {
+        RINGAL.with_borrow_mut(|r| r.extendable($capacity).map($cb))
+    };
+}
+
+#[cfg(any(feature = "drop", test))]
+impl Drop for RingAl {
+    fn drop(&mut self) {
+        use std::time::Duration;
+        let start = self.head;
+        let mut head = self.head;
+        let mut next = Header::new(start);
+        let mut capacity = 0;
+        loop {
+            if !next.available() {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            let nnext = next.next();
+            if nnext > next {
+                capacity += next.capacity() / USIZELEN;
+            }
+            capacity += 1;
+            next = nnext;
+            if next.inner() == start {
+                break;
+            }
+            let inner = next.inner();
+            head = head.min(inner)
+        }
+        let slice = std::ptr::slice_from_raw_parts_mut(head, capacity);
+        // SAFETY:
+        // 1. all pointers always point inside the backing store
+        // 2. the original slice length has been recomputed
+        // 3. the starting address is identified via wrap around detection
+        // 4. it's just a reclamation of leaked boxed slice
+        let _ = unsafe { Box::from_raw(slice) };
+    }
+}
+
 /// Buffer types
 mod buffer;
 /// Essential header canaries
