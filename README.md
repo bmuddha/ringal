@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/ringal.svg)](https://crates.io/crates/ringal)
 [![Documentation](https://docs.rs/ringal/badge.svg)](https://docs.rs/ringal)
-[![Build Status](https://github.com/bmuddha/ringal/workflows/CI/badge.svg)](https://github.com/bmuddha/ringal/actions)
+[![Build Status](https://github.com/bmuddha/ringal/actions/workflows/test.yml/badge.svg)](https://github.com/bmuddha/ringal/actions)
 
 ## Overview
 
