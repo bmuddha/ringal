@@ -8,7 +8,7 @@ repository = "https://github.com/bmuddha/ringal"
 documentation = "https://docs.rs/ringal"
 homepage = "https://crates.io/crates/ringal"
 keywords = ["allocator", "ring", "buffer", "memory"]
-categories = ["memory-management", "concurrency", "allocator"]
+categories = ["memory-management", "concurrency"]
 edition = "2021"
 
 [dependencies]
