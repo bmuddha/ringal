@@ -103,13 +103,14 @@ impl Write for ExtBuf<'_> {
             self.header = header;
             // lock the new memory region
             self.header.set();
+            self.initialized = 0;
             // copy existing data from tail to new memory region
             let _ = self.write(old)?;
             // copy argument buffer
             return self.write(buf);
         }
         // readjust the next guard pointer in case if fragmentation happened
-        let end = header.next().inner();
+        let end = header.next().0;
         self.header.store(end);
         // SAFETY: safe, we exclusively own the memory region
         // with `ExtBuf`, so the buf cannot overlap with it, we
@@ -127,6 +128,7 @@ impl Write for ExtBuf<'_> {
 // Custom Drop implementation in order to handle edge
 // case, when ExtBuf is dropped without being finalized
 impl Drop for ExtBuf<'_> {
+    #[inline(always)]
     fn drop(&mut self) {
         if !self.finalized {
             // will unset the header upon drop, unlocking the memory
@@ -157,6 +159,7 @@ impl FixedBufMut {
     }
 
     /// available (uninitialized) capacity in bytes
+    #[inline(always)]
     pub fn spare(&self) -> usize {
         self.inner.len() - self.initialized
     }
@@ -181,8 +184,10 @@ impl Write for FixedBufMut {
         let tocopy = self.spare().min(buf.len());
         let src = buf.as_ptr();
         unsafe {
-            let uninit = self.inner.get_unchecked_mut(self.initialized..);
-            uninit.as_mut_ptr().copy_from_nonoverlapping(src, tocopy);
+            self.inner
+                .as_mut_ptr()
+                .add(self.initialized)
+                .copy_from_nonoverlapping(src, tocopy);
         }
         self.initialized += tocopy;
         Ok(tocopy)

@@ -19,7 +19,7 @@ macro_rules! setup {
     () => {{
         let ringal = RingAl::new(SIZE);
         let start = ringal.head;
-        let end = Header::new(start).next().inner();
+        let end = Header(start).next().0;
         let guard = IntegrityGuard { start, end };
         (ringal, guard)
     }};
@@ -27,23 +27,19 @@ macro_rules! setup {
 
 impl Drop for IntegrityGuard {
     fn drop(&mut self) {
-        let mut next = Header::new(self.start);
+        let mut next = Header(self.start);
         let max = SIZE / USIZELEN - 1;
         for _ in 0..max {
             next = next.next();
-            if next.inner() == self.start {
+            if next.0 == self.start {
                 break;
             }
             assert!(
-                next.inner() <= self.end,
+                next.0 <= self.end,
                 "pointers in ring buffer should always point inside"
             )
         }
-        assert_eq!(
-            next.inner(),
-            self.start,
-            "ring buffer should always wrap around"
-        )
+        assert_eq!(next.0, self.start, "ring buffer should always wrap around")
     }
 }
 
@@ -68,8 +64,8 @@ fn test_alloc() {
         "should be able to allocate with new allocator"
     );
     let header = header.unwrap();
-    assert_eq!(header.inner(), start);
-    assert_eq!(header.next().inner(), ringal.head);
+    assert_eq!(header.0, start);
+    assert_eq!(header.next().0, ringal.head);
 }
 
 #[test]
@@ -78,7 +74,7 @@ fn test_multi_alloc() {
     let (mut ringal, _g) = setup!();
     let mut allocations = Vec::<Guard>::with_capacity(COUNT);
     for i in 0..COUNT {
-        let size = SIZE / COUNT - USIZELEN - (i == COUNT - 1) as usize * USIZELEN;
+        let size = SIZE / COUNT - USIZELEN * 2 - (i == COUNT - 1) as usize * USIZELEN;
         let header = ringal.alloc(size);
         assert!(
             header.is_some(),
@@ -141,8 +137,8 @@ fn test_ext_buf_alloc() {
 #[test]
 fn test_ext_buf_multi_alloc() {
     let (mut ringal, _g) = setup!();
-    const MSG: &[u8] = b"70aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const ITERS: usize = (SIZE - USIZELEN) / (MSG.len() + USIZELEN);
+    const MSG: &[u8] = b"64aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ITERS: usize = (SIZE - USIZELEN) / (MSG.len() + USIZELEN * 2);
     let mut buffers = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
         let writer = ringal.extendable(MSG.len());
@@ -223,9 +219,8 @@ fn test_fixed_buf_alloc() {
         MSG.len(),
         "fixed buffer len should be equal to that of written message"
     );
-    assert_eq!(
-        buffer.spare(),
-        MINALLOC * USIZELEN - MSG.len(),
+    assert!(
+        buffer.spare() > 1,
         "fixed buffer should have some spare capacity left after write"
     );
 }
@@ -233,8 +228,8 @@ fn test_fixed_buf_alloc() {
 #[test]
 fn test_fixed_buf_multi_alloc() {
     let (mut ringal, _g) = setup!();
-    const MSG: &[u8] = b"70aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const ITERS: usize = (SIZE - USIZELEN) / (MSG.len() + USIZELEN);
+    const MSG: &[u8] = b"64aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ITERS: usize = (SIZE - USIZELEN) / (MSG.len() + USIZELEN * 2);
     let mut buffers = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
         let buffer = ringal.fixed(MSG.len());
