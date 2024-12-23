@@ -1,0 +1,43 @@
+name: Ringal Tests
+
+on:
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  rust-checks:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/cache@v4
+      with:
+        path: |
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+    - name: Install rustfmt and clippy
+      run: rustup component add rustfmt clippy
+    - name: Run rustfmt
+      run: cargo fmt --check
+    - name: Run clippy
+      run: cargo clippy -- -D warnings
+
+  test-and-build:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:latest
+  
+    needs: 
+      - rust-checks
+  
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/cache@v4
+      with:
+        path: |
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+    - name: Run tests
+      run: cargo test
