@@ -74,7 +74,9 @@ can result in one of four scenarios:
      -------------------------------------------------------------------------
 ```
 
-_*Note*_: `Head` and `Tail` canaries are standard guard sequences that persist, with the `Tail` canary perpetually pointing to the `Head`, forming a circular structure.
+_*Note*_: `Head` and `Tail` canaries are standard guard sequences that persist,
+with the `Tail` canary perpetually pointing to the `Head`, forming a circular
+(ring) structure.
 
 ## Features
 
@@ -105,11 +107,11 @@ For more details, visit the [RingAl Documentation](https://docs.rs/ringal).
    remain active for the duration of the application's execution. However, in
    scenarios where early deallocation of the allocator and its associated
    resources is required, activating the `drop` feature is essential. This
-   feature implements a tailored `Drop` mechanism that suspends the executing
-   thread until all associated allocations are conclusively released,
-   subsequently deallocating the underlying storage. It is critical to ensure
-   allocations do not extend significantly beyond the intended drop point.
-   Failure to enable this feature will result in a memory leak upon
+   feature implements a tailored `Drop` mechanism that blocks (by busy wating)
+   the executing thread until all associated allocations are conclusively
+   released, subsequently deallocating the underlying storage. It is critical
+   to ensure allocations do not extend significantly beyond the intended drop
+   point. Failure to enable this feature will result in a memory leak upon
    attempting to drop the allocator.
 
 ## Usage examples
@@ -122,6 +124,7 @@ let msg = b"hello world, this message is longer than allocated capacity, but buf
 grow as needed during the write, provided that allocator still has necessary capacity";
 // but we're still able to write the entire message, as the buffer grows dynamically
 let size = buffer.write(msg).unwrap();
+// until the ExtBuf is finalized or dropped no further allocations are possible
 let fixed = buffer.finalize();
 assert_eq!(fixed.as_ref(), msg);
 assert_eq!(fixed.len(), size);
@@ -131,18 +134,53 @@ assert_eq!(fixed.len(), size);
 let mut allocator = RingAl::new(1024); // Create an allocator with initial size
 let mut buffer = allocator.fixed(256).unwrap();
 let size = buffer.write(b"hello world, this message is relatively short").unwrap();
+// we have written some some bytes 
 assert_eq!(buffer.len(), size);
+// but we still have some capacity left for more writes if necessary
 assert_eq!(buffer.spare(), 256 - size);
 ```
 ### Multi-threaded environment
 ```rust
+let mut allocator = RingAl::new(1024); // Create an allocator with initial size
+let (tx, rx) = channel();
+let mut buffer = allocator.fixed(64).unwrap();
+let _ = buffer.write(b"this a message to other thread").unwrap();
+// send the buffer to another thread
+let handle = std::thread::spawn(move || {
+    let buffer = rx.recv().unwrap();
+    // from another thread, freeze the buffer, making it readonly
+    let readonly = buffer.freeze();
+    let mut handles = Vec::with_capacity(16);
+    for i in 0..16 {
+        let (tx, rx) = channel();
+        // send the clones (cheap) of readonly buffer to more threads
+        let h = std::thread::spawn(move || {
+            let msg = rx.recv().unwrap();
+            let msg = std::str::from_utf8(&msg[..]).unwrap();
+            println!("{i}. {msg}");
+        });
+        tx.send(readonly.clone());
+        handles.push(h);
+    }
+    for h in handles {
+        h.join();
+    }
+});
+tx.send(buffer);
+handle.join();
 ```
+
+## Dependencies
+The crate is designed without any external dependencies, and only relies on standard library
+
+## Planned features
+- Allocation of buffers with generic types
 
 # Safety
 This library is the epitome of cautious engineering! Well, that's what we'd
 love to claim, but the truth is it's peppered with `unsafe` blocks. At times,
 it seems like the code is channeling its inner C spirit, with raw pointer
-arithmetic lurking around every corner. But in all seriousness, considerable
+operations lurking around every corner. But in all seriousness, considerable
 effort has been devoted to ensuring that the safe API exposed by this crate is
 truly safe for users and doesn't invite any unwelcome Undefined Behaviors or
 other nefarious calamities. Proceed with confidence...

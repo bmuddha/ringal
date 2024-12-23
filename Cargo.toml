@@ -1,6 +1,14 @@
 [package]
 name = "ringal"
 version = "0.1.0"
+authors = ["bmuddha13@gmail.com"]
+description = "Efficient ring allocator for short-lived buffers."
+license = "MIT"
+repository = "https://github.com/bmuddha/ringal"
+documentation = "https://docs.rs/ringal"
+homepage = "https://crates.io/crates/ringal"
+keywords = ["allocator", "ring", "buffer", "memory"]
+categories = ["memory-management", "concurrency", "allocator"]
 edition = "2021"
 
 [dependencies]
