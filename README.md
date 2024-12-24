@@ -27,14 +27,28 @@ rendering it inefficient.
 
 ## Design Philosophy
 
-RingAl's core strength lies in its dynamic and self-descriptive backing store,
-which adapts to various allocation demands through guard sequences. These
-sequences dynamically emerge, alter, and disappear to facilitate different
-allocation requests. The implementation leverages a single `usize` pointer to
-manage memory guards, exclusively employing atomic CPU instructions for access.
-This enables safe multithreaded buffer usage while incurring minimal access
-overhead. Notably, the allocator itself is not `Sync` and cannot be accessed
-concurrently by multiple threads.
+# Design Philosophy
+The core functionality of RingAl is dedicated to an advanced and flexible memory management
+system. This system is designed to support a wide array of allocation needs by employing guard
+sequences. These guard sequences can dynamically adapt to varying allocation scenarios by being
+created, changed and destroyed as required. The implementation efficiently utilizes a single
+`usize` head pointer to manage these memory guards.
+
+This architecture is carefully crafted to ensure safe and efficient multithreaded buffer
+operations. It allows exclusive write access to one thread while permitting simultaneous read
+access by another thread. Although this design may naturally give rise to race conditions,
+particularly when the writing thread releases the buffer without immediate notification to the
+reading or allocating thread, these issues are mitigated through a strategy of optimistic
+availability checks. When the allocating thread encounters an engaged buffer, it simply returns
+`None`, signaling to the caller to retry the operation later. This approach effectively avoids
+the need for costly atomic synchronization operations by relying on eventual consistency, which
+is appropriate for the intended use cases of this allocator.
+
+It is important to highlight that this allocator is not marked as `Sync`, preventing its
+concurrent use across multiple threads. All allocation operations require `&mut self`,
+inherently disallowing the allocator from being wrapped within an `Arc`. Using locks around the
+allocator is discouraged as it could significantly degrade performance, it is recommended to
+utilize thread local storage instead.
 
 ### Guard Insights:
 
@@ -169,6 +183,70 @@ let handle = std::thread::spawn(move || {
 tx.send(buffer);
 handle.join();
 ```
+
+# Benchmarks
+
+Benchmark comparisons are made between two buffer allocator implementations:
+`RingAl` and `System allocator` used by `Vec<u8>`. The benchmarks measure
+performance across different scenarios with varying parameters.
+
+## Parameters Explanation
+- **Iterations**: Number of operations performed
+- **Buffer Size**: Maximum number of bytes that could be written to buffer, the actual number is random
+- **Max Buffers**: Maximum number of buffers that are kept around after allocation
+
+## Fixed Preallocated Buffer Results
+*Scenario:*
+1. Allocate the buffer with respective allocator, the buffer capacity is equal
+   to or greater than the size of data to be written
+2. Write random number of bytes via `Write` trait implementation, upper limit
+   is capped at `Buffer Size`
+3. Send the buffer to another thread via unbounded channel, to prevent immediate deallocation
+4. After enough buffers are collected on other thread, drop them all in one batch
+5. Perform this sequence `Iterations` times
+
+| Iterations | Buffer Size | Max Buffers | ringal (ms) | vec (ms) | Speed Improvement |
+|------------|-------------|-------------|-------------|----------|-------------------|
+| 10,000,000 | 64         | 64          | 696.7       | 998.0    | 1.43x            |
+| 10,000,000 | 1,024      | 64          | 923.4       | 2,062.0  | 2.23x            |
+| 10,000,000 | 1,024      | 1,024       | 913.7       | 1,622.0  | 1.77x            |
+| 1,000,000  | 65,536     | 64          | 932.6       | 1,718.0  | 1.84x            |
+| 1,000,000  | 131,072    | 1,024       | 1,709.0     | 3,960.0  | 2.32x            |
+
+## Extendable Buffer Results (Chunked Writes)
+*Scenario:*
+1. Create an empty buffer with respective allocator, the buffer capacity is 0
+2. Write random number of bytes via `Write` trait implementation, upper limit
+   is capped at `Buffer Size`, the writes are performed in chunks of 64 bytes,
+   forcing the buffers to grow dynamically and keep reallocating.
+3. Send the buffer to another thread via unbounded channel, to prevent
+   immediate deallocation
+4. After enough buffers are collected on other thread, drop them all in one batch
+5. Perform this sequence `Iterations` times
+
+| Iterations | Buffer Size | Max Buffers | ringal (ms) | vec (ms) | Speed Improvement |
+|------------|-------------|-------------|-------------|----------|-------------------|
+| 10,000,000 | 64         | 64          | 834.0       | 1,120.0  | 1.34x            |
+| 10,000,000 | 1,024      | 64          | 1,164.0     | 3,228.0  | 2.77x            |
+| 10,000,000 | 1,024      | 1,024       | 1,205.0     | 3,044.0  | 2.53x            |
+| 1,000,000  | 65,536     | 64          | 1,958.0     | 3,646.0  | 1.86x            |
+| 1,000,000  | 131,072    | 1,024       | 3,588.0     | 9,008.0  | 2.51x            |
+
+## Key Findings
+
+1. The `ringal` implementation consistently outperforms the `vec` implementation across all test scenarios
+2. Performance improvements range from 1.34x to 2.77x faster
+3. Largest performance gains are observed with larger buffer sizes
+4. Both fixed preallocated and extendable buffer scenarios show significant improvements
+
+## System Information
+
+All benchmarks were run using hyperfine with 10 runs per test case. Times shown are mean values.
+
+This setup was used to run all benchmarks mentioned in this document:
+- **Device:** Apple MacBook Air
+- **Processor:** Apple M2
+- **Memory:** 16 GB RAM
 
 ## Dependencies
 The crate is designed without any external dependencies, and only relies on standard library
