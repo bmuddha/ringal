@@ -21,32 +21,29 @@
 //! 5. **Recycled Storage**: Upon buffer deallocation, the backing store becomes
 //!    available for subsequent allocations.
 //!
-
-//! # Design Philosophy
+//! RingAl library focuses on a robust and versatile memory management system, through the use of
+//! dynamic and self descriptive backing store. This system is engineered to accommodate a wide
+//! range of allocation requirements through the use of guard sequences. These guard sequences are
+//! capable of adjusting dynamically to different allocation conditions by being created, modified,
+//! and removed as necessary. The system effectively manages these memory guards using a single
+//! `usize` head pointer.
 //!
-//! The core functionality of RingAl is dedicated to an advanced and flexible memory management
-//! system. This system is designed to support a wide array of allocation needs by employing guard
-//! sequences. These guard sequences can dynamically adapt to varying allocation scenarios by being
-//! created, changed and destroyed as required. The implementation efficiently utilizes a single
-//! `usize` head pointer to manage these memory guards.
+//! The design is structured to ensure both safe and efficient multithreaded buffer operations. It
+//! grants exclusive write access to one thread while allowing another thread to read
+//! simultaneously. Although this design does inevitably lead to race conditions, particularly when
+//! the writing thread releases the buffer, without proper synchronization with reading or
+//! allocating thread, these issues are addressed through a method of optimistic availability
+//! checks. If the allocating thread finds a buffer in use, it returns `None`, indicating to the
+//! caller to retry the operation. This method avoids the need for expensive atomic synchronization
+//! by relying on eventual consistency, which is suitable for the use cases of this allocator.
 //!
-//! This architecture is carefully crafted to ensure safe and efficient multithreaded buffer
-//! operations. It allows exclusive write access to one thread while permitting simultaneous read
-//! access by another thread. Although this design may naturally give rise to race conditions,
-//! particularly when the writing thread releases the buffer without immediate notification to the
-//! reading or allocating thread, these issues are mitigated through a strategy of optimistic
-//! availability checks. When the allocating thread encounters an engaged buffer, it simply returns
-//! `None`, signaling to the caller to retry the operation later. This approach effectively avoids
-//! the need for costly atomic synchronization operations by relying on eventual consistency, which
-//! is appropriate for the intended use cases of this allocator.
+//! It is important to note that this allocator is not marked as `Sync`, which restricts its
+//! concurrent use across multiple threads. All allocation actions require `&mut self`, inherently
+//! preventing the allocator from being enclosed within an `Arc`. Using locks around the allocator
+//! is not recommended as it can greatly reduce performance; instead, it is advisable to use
+//! thread-local storage.
 //!
-//! It is important to highlight that this allocator is not marked as `Sync`, preventing its
-//! concurrent use across multiple threads. All allocation operations require `&mut self`,
-//! inherently disallowing the allocator from being wrapped within an `Arc`. Using locks around the
-//! allocator is discouraged as it could significantly degrade performance, it is recommended to
-//! utilize thread local storage instead.
-//!
-//! # Guard Insights:
+//! # Guard sequence insights:
 //!
 //! Each guard encodes:
 //! 1. A flag indicating whether the guarded memory region is in use.
@@ -102,8 +99,6 @@
 //!    distributable across multiple threads. These involve an additional heap
 //!    allocation for a reference counter and should be avoided unless necessary to
 //!    prevent overhead.
-//!
-//! For more details, visit the [RingAl Documentation](https://docs.rs/ringal).
 //!
 //! # Optional Crate Features (Cargo)
 //! 1. **`tls` (Thread-Local Storage):** This feature enables advanced
@@ -187,6 +182,22 @@
 //! tx.send(buffer);
 //! handle.join();
 //! ```
+//!
+//! ## Thread Local Storage
+//! ```rust
+//! # use ringal::ringal;
+//! # use std::io::Write;
+//! ringal!(@init, 1024);
+//! // allocate fixed buffer
+//! let mut fixed = ringal!(@fixed, 64).unwrap();
+//! let _ = fixed.write(b"hello world!").unwrap();
+//! // allocate extendable buffer and write some data to it
+//! ringal!{@ext, 64, |mut extendable| {
+//!     let _ = extendable.write(b"hello world!").unwrap();
+//!     extendable.finalize()
+//! }};
+//! ```
+//!
 //!
 //! # Dependencies
 //! The crate is designed without any external dependencies, and only relies on standard library
@@ -364,6 +375,7 @@ impl RingAl {
 macro_rules! ringal {
     (@init, $capacity: expr) => {
         use std::cell::RefCell;
+        use $crate::RingAl;
 
         thread_local! {
             pub static RINGAL: RefCell<RingAl> = RefCell::new(RingAl::new($capacity));
