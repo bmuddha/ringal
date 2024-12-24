@@ -1,6 +1,6 @@
 [package]
 name = "ringal"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["bmuddha13@gmail.com"]
 description = "Efficient ring allocator for short-lived buffers."
 license = "MIT"
