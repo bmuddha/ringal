@@ -40,4 +40,4 @@ jobs:
           target/
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
     - name: Run tests
-      run: cargo test
+      run: cargo test --all-features
