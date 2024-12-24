@@ -23,15 +23,24 @@
 //!
 //! # Design Philosophy
 //!
-//! RingAl's core strength lies in its dynamic and self-descriptive backing store,
-//! which adapts to various allocation demands through guard sequences. These
-//! sequences dynamically emerge, alter, and disappear to facilitate different
-//! allocation requests. The implementation leverages a single `usize` pointer to
-//! manage memory guards, exclusively employing atomic CPU instructions for access.
-//! This enables safe multithreaded buffer usage while incurring minimal access
-//! overhead. Notably, the allocator itself is not `Sync` and cannot be accessed
-//! concurrently by multiple threads.
+//! The primary functionality of RingAl is centered around an advanced and adaptable memory
+//! management system. This system is engineered to accommodate a wide range of allocation
+//! requirements through the utilization of guard sequences. These guard sequences possess the
+//! ability to dynamically adapt to various allocation conditions by evolving, transforming, or
+//! dissolving as necessary. The implementation strategically employs a singular `usize` pointer to
+//! manage these memory guards with efficiency.
 //!
+//! The architecture guarantees safe and effective multithreaded buffer operations by ensuring
+//! exclusive write access to a single thread at any given moment, while concurrently allowing read
+//! access to another thread. While this design may inherently lead to race conditions, particularly
+//! in scenarios where the writing thread releases the buffer without immediate detection by the
+//! reading or allocating thread due to non-atomic operations, such race conditions are mitigated
+//! through a strategy of optimistic availability checks. In instances where the allocating thread
+//! encounters a buffer currently in use, it promptly returns `None`, signaling to the caller the
+//! necessity of retrying the operation at a later time. This mechanism ensures that the release of
+//! memory by the writing thread is eventually recognized by the reading thread.
+//!
+//! It is imperative to highlight that the allocator is explicitly not marked as `Sync`. This denotes that it is not designed for concurrent access by multiple threads, and such usage should be avoided to maintain system integrity.
 //! # Guard Insights:
 //!
 //! Each guard encodes:
@@ -137,7 +146,7 @@
 //! // we have written some some bytes
 //! assert_eq!(buffer.len(), size);
 //! // but we still have some capacity left for more writes if necessary
-//! assert_eq!(buffer.spare(), 256 - size);
+//! assert!(buffer.spare() >= 256 - size);
 //! ```
 //! ## Multi-threaded environment
 //! ```rust
@@ -189,6 +198,8 @@
 //! truly safe for users and doesn't invite any unwelcome Undefined Behaviors or
 //! other nefarious calamities. Proceed with confidence...
 
+use std::alloc::{alloc, Layout};
+
 pub use buffer::{ExtBuf, FixedBuf, FixedBufMut};
 use header::Header;
 
@@ -197,39 +208,41 @@ pub struct RingAl {
     /// pointer to guard sequence which will be used for next allocation
     head: *mut usize,
 }
-
 /// Platform specific size of machine word
 const USIZELEN: usize = size_of::<usize>();
 /// We restrict granularity of allocation by rounding up the allocated
-/// capacity to multiple of 4 machine words (converted to byte count)
-const MINALLOC: usize = 4;
+/// capacity to multiple of 8 machine words (converted to byte count)
+const MINALLOC: usize = 8;
+const DEFAULT_ALIGNMENT: usize = 64;
 
 impl RingAl {
-    /// Initialize ring allocator with given capacity. Allocated capacity might
-    /// be different from what was requested, but will contain at least `size` bytes.
-    /// NOTE: not entire capacity will be available for allocation due to
-    /// guard headers being part of allocations and taking up space as well
-    pub fn new(mut size: usize) -> Self {
-        assert!(size > USIZELEN && size < usize::MAX >> 1);
-        size = size.next_power_of_two() / USIZELEN;
-        let mut buffer = Vec::<usize>::with_capacity(size);
-        size = buffer.capacity();
-        // SAFETY: with capacity will allocate at least `size`, so it's safe to call set_len.
-        // Unitialized data is not an issue since we never read it before writing to it first.
-        #[allow(clippy::uninit_vec)]
-        unsafe {
-            buffer.set_len(size)
-        };
-        // we need the backing store to be static, as it needs to outlive all active allocations
-        let inner = Box::leak(buffer.into_boxed_slice()).as_mut_ptr();
-        let head = inner;
+    /// Initialize ring allocator with given capacity and default alignment. Allocated capacity
+    /// might be different from what was requested, but will contain at least `size` bytes.
+    ///
+    /// NOTE:
+    /// not entire capacity will be available for allocation due to guard headers being part of
+    /// allocations and taking up space as well
+    pub fn new(size: usize) -> Self {
+        Self::new_with_align(size, DEFAULT_ALIGNMENT)
+    }
+
+    /// Initialize ring allocator with given capacity and alignment. Allocated capacity might be
+    /// different from what was requested, but will contain at least `size` bytes.
+    ///
+    /// NOTE: not entire capacity will be available for allocation due to guard headers being part
+    /// of allocations and taking up space as well
+    pub fn new_with_align(mut size: usize, align: usize) -> Self {
+        assert!(size > USIZELEN && size < usize::MAX >> 1 && align.is_power_of_two());
+        size = size.next_power_of_two();
+        let inner = unsafe { alloc(Layout::from_size_align_unchecked(size, align)) };
+
+        let head = inner as *mut usize;
         // get a pointer to the last guard sequence
-        let tail = unsafe { inner.add(size - 1) };
+        size /= USIZELEN;
+        let tail = unsafe { head.add(size - 1) };
         // as we don't have any allocations yet, put the entire capacity
         // of backing store into first guard, and let the last guard point
         // back to first one, forming ring structure.
-        // NOTE: we aren't using atomic access, as we
-        // have exclusive access to everything for now
         unsafe { *head = (tail as usize) << 1 };
         unsafe { *tail = (head as usize) << 1 };
 
@@ -239,6 +252,7 @@ impl RingAl {
     /// Try to allocate a fixed (non-extandable) buffer with at least
     /// `size` bytes of capacity, the operation will fail, returning
     /// `None`, if backing store doesn't have enough capacity available.
+    #[inline(always)]
     pub fn fixed(&mut self, size: usize) -> Option<FixedBufMut> {
         let header = self.alloc(size)?;
         header.set();
@@ -273,9 +287,9 @@ impl RingAl {
     /// Try to lock at least `size` bytes from backing store
     fn alloc(&mut self, mut size: usize) -> Option<Header> {
         // we need to convert the size from count of bytes to count of usizes
-        size = (size / USIZELEN + (size % USIZELEN != 0) as usize).max(MINALLOC);
+        size = size / USIZELEN + 1;
         // begin accumulating capacity
-        let mut start = Header::new(self.head);
+        let mut start = Header(self.head);
         let mut accumulated = 0;
         let mut next = start;
         // when the current guard sequence references a memory region smaller than the requested size,
@@ -284,32 +298,30 @@ impl RingAl {
         while accumulated < size {
             next.available().then_some(())?;
             next = next.next();
+            accumulated = start.distance(&next);
             // in the event that the allocation wraps around to the initial guard without acquiring
             // the required capacity, it indicates that the underlying storage is insufficient to
             // meet the requested allocation. This suggests that the storage size needs to be
             // increased to accommodate the allocation demands.
-            (next != self.head).then_some(())?;
+            (next.0 != self.head).then_some(())?;
             // upon wrapping around to the start of the backing store, we discard the accumulated
             // capacity. This step is crucial to ensure a contiguous memory region is available for
             // the buffer allocation.
             if next < start {
                 accumulated = 0;
                 start = next;
-                continue;
             }
-            accumulated = start.distance(&next);
         }
         // If the difference between the accumulated capacity and the requested size is less than
-        // or equal to MINALLOC, extend the allocation to the nearest multiple of 4 machine words
+        // or equal to MINALLOC, extend the allocation to the nearest multiple of 8 machine words
         // and update the head pointer accordingly.
-        if (accumulated - size) <= MINALLOC {
-            self.head = next.inner();
-        } else {
+        if (accumulated - size) > MINALLOC {
             // Otherwise, split the accumulated memory region into the requested size and
             // the remaining portion. Update the head pointer to the start of the remainder.
-            self.head = unsafe { start.inner().add(size + 1) };
-            let head = Header::new(self.head);
-            head.store(next.inner());
+            self.head = unsafe { start.0.add(size + 1) };
+            Header(self.head).store(next.0);
+        } else {
+            self.head = next.0;
         }
         // Update the start header with the new head pointer to
         // ensure the guard sequence points to the next header.
@@ -368,7 +380,7 @@ impl Drop for RingAl {
         use std::time::Duration;
         let start = self.head;
         let mut head = self.head;
-        let mut next = Header::new(start);
+        let mut next = Header(start);
         let mut capacity = 0;
 
         // Ensure all allocations are released before proceeding
@@ -389,10 +401,10 @@ impl Drop for RingAl {
             next = nnext;
             // If we have looped back to the starting point, all allocations
             // are released, and the full capacity is recalculated
-            if next.inner() == start {
+            if next.0 == start {
                 break;
             }
-            let inner = next.inner();
+            let inner = next.0;
             head = head.min(inner)
         }
         let slice = std::ptr::slice_from_raw_parts_mut(head, capacity);
