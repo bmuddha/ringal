@@ -198,6 +198,8 @@
 //! truly safe for users and doesn't invite any unwelcome Undefined Behaviors or
 //! other nefarious calamities. Proceed with confidence...
 
+use std::alloc::{alloc, Layout};
+
 pub use buffer::{ExtBuf, FixedBuf, FixedBufMut};
 use header::Header;
 
@@ -206,34 +208,38 @@ pub struct RingAl {
     /// pointer to guard sequence which will be used for next allocation
     head: *mut usize,
 }
-
 /// Platform specific size of machine word
 const USIZELEN: usize = size_of::<usize>();
 /// We restrict granularity of allocation by rounding up the allocated
-/// capacity to multiple of 4 machine words (converted to byte count)
-const MINALLOC: usize = 4;
+/// capacity to multiple of 8 machine words (converted to byte count)
+const MINALLOC: usize = 8;
+const DEFAULT_ALIGNMENT: usize = 64;
 
 impl RingAl {
-    /// Initialize ring allocator with given capacity. Allocated capacity might
-    /// be different from what was requested, but will contain at least `size` bytes.
-    /// NOTE: not entire capacity will be available for allocation due to
-    /// guard headers being part of allocations and taking up space as well
-    pub fn new(mut size: usize) -> Self {
-        assert!(size > USIZELEN && size < usize::MAX >> 1);
-        size = size.next_power_of_two() / USIZELEN;
-        let mut buffer = Vec::<usize>::with_capacity(size);
-        size = buffer.capacity();
-        // SAFETY: with capacity will allocate at least `size`, so it's safe to call set_len.
-        // Unitialized data is not an issue since we never read it before writing to it first.
-        #[allow(clippy::uninit_vec)]
-        unsafe {
-            buffer.set_len(size)
-        };
-        // we need the backing store to be static, as it needs to outlive all active allocations
-        let inner = Box::leak(buffer.into_boxed_slice()).as_mut_ptr();
-        let head = inner;
+    /// Initialize ring allocator with given capacity and default alignment. Allocated capacity
+    /// might be different from what was requested, but will contain at least `size` bytes.
+    ///
+    /// NOTE:
+    /// not entire capacity will be available for allocation due to guard headers being part of
+    /// allocations and taking up space as well
+    pub fn new(size: usize) -> Self {
+        Self::new_with_align(size, DEFAULT_ALIGNMENT)
+    }
+
+    /// Initialize ring allocator with given capacity and alignment. Allocated capacity might be
+    /// different from what was requested, but will contain at least `size` bytes.
+    ///
+    /// NOTE: not entire capacity will be available for allocation due to guard headers being part
+    /// of allocations and taking up space as well
+    pub fn new_with_align(mut size: usize, align: usize) -> Self {
+        assert!(size > USIZELEN && size < usize::MAX >> 1 && align.is_power_of_two());
+        size = size.next_power_of_two();
+        let inner = unsafe { alloc(Layout::from_size_align_unchecked(size, align)) };
+
+        let head = inner as *mut usize;
         // get a pointer to the last guard sequence
-        let tail = unsafe { inner.add(size - 1) };
+        size /= USIZELEN;
+        let tail = unsafe { head.add(size - 1) };
         // as we don't have any allocations yet, put the entire capacity
         // of backing store into first guard, and let the last guard point
         // back to first one, forming ring structure.
@@ -307,7 +313,7 @@ impl RingAl {
             }
         }
         // If the difference between the accumulated capacity and the requested size is less than
-        // or equal to MINALLOC, extend the allocation to the nearest multiple of 4 machine words
+        // or equal to MINALLOC, extend the allocation to the nearest multiple of 8 machine words
         // and update the head pointer accordingly.
         if (accumulated - size) > MINALLOC {
             // Otherwise, split the accumulated memory region into the requested size and
