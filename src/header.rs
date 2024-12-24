@@ -66,8 +66,20 @@ impl From<Header> for Guard {
 impl Drop for Guard {
     #[inline(always)]
     fn drop(&mut self) {
-        // release the lock from memory region,
-        // making it available to allocator
+        // releases the lock from the specified memory region, thereby making it available for the allocator.
+        //
+        // # safety and ordering guarantees
+        //
+        // the operation of releasing the lock is non-atomic and migth cause race conditions in
+        // multithreaded context. It is ensured that the caller of `drop` is the sole entity
+        // capable of writing to the region at this point in the execution timeline. Furthermore,
+        // the compiler enforces strict ordering such that this operation cannot be reordered with
+        // other operations that might utilize this memory region.
+        //
+        // importantly, the allocator is restricted from accessing the region until it is fully released.
+        // While there may be a delay in the visibility of this operation to the allocator due to CPU caching,
+        // the change will eventually propagate to the allocator's thread. Consequently, potential race conditions
+        // are effectively mitigated by these guarantees, ensuring correctness and eventual consistency.
         *self.0 &= usize::MAX << 1;
     }
 }
