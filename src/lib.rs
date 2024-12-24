@@ -21,26 +21,31 @@
 //! 5. **Recycled Storage**: Upon buffer deallocation, the backing store becomes
 //!    available for subsequent allocations.
 //!
+
 //! # Design Philosophy
 //!
-//! The primary functionality of RingAl is centered around an advanced and adaptable memory
-//! management system. This system is engineered to accommodate a wide range of allocation
-//! requirements through the utilization of guard sequences. These guard sequences possess the
-//! ability to dynamically adapt to various allocation conditions by evolving, transforming, or
-//! dissolving as necessary. The implementation strategically employs a singular `usize` pointer to
-//! manage these memory guards with efficiency.
+//! The core functionality of RingAl is dedicated to an advanced and flexible memory management
+//! system. This system is designed to support a wide array of allocation needs by employing guard
+//! sequences. These guard sequences can dynamically adapt to varying allocation scenarios by being
+//! created, changed and destroyed as required. The implementation efficiently utilizes a single
+//! `usize` head pointer to manage these memory guards.
 //!
-//! The architecture guarantees safe and effective multithreaded buffer operations by ensuring
-//! exclusive write access to a single thread at any given moment, while concurrently allowing read
-//! access to another thread. While this design may inherently lead to race conditions, particularly
-//! in scenarios where the writing thread releases the buffer without immediate detection by the
-//! reading or allocating thread due to non-atomic operations, such race conditions are mitigated
-//! through a strategy of optimistic availability checks. In instances where the allocating thread
-//! encounters a buffer currently in use, it promptly returns `None`, signaling to the caller the
-//! necessity of retrying the operation at a later time. This mechanism ensures that the release of
-//! memory by the writing thread is eventually recognized by the reading thread.
+//! This architecture is carefully crafted to ensure safe and efficient multithreaded buffer
+//! operations. It allows exclusive write access to one thread while permitting simultaneous read
+//! access by another thread. Although this design may naturally give rise to race conditions,
+//! particularly when the writing thread releases the buffer without immediate notification to the
+//! reading or allocating thread, these issues are mitigated through a strategy of optimistic
+//! availability checks. When the allocating thread encounters an engaged buffer, it simply returns
+//! `None`, signaling to the caller to retry the operation later. This approach effectively avoids
+//! the need for costly atomic synchronization operations by relying on eventual consistency, which
+//! is appropriate for the intended use cases of this allocator.
 //!
-//! It is imperative to highlight that the allocator is explicitly not marked as `Sync`. This denotes that it is not designed for concurrent access by multiple threads, and such usage should be avoided to maintain system integrity.
+//! It is important to highlight that this allocator is not marked as `Sync`, preventing its
+//! concurrent use across multiple threads. All allocation operations require `&mut self`,
+//! inherently disallowing the allocator from being wrapped within an `Arc`. Using locks around the
+//! allocator is discouraged as it could significantly degrade performance, it is recommended to
+//! utilize thread local storage instead.
+//!
 //! # Guard Insights:
 //!
 //! Each guard encodes:
