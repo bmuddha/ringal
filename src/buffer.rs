@@ -62,10 +62,6 @@ impl ExtBuf<'_> {
 
 impl Write for ExtBuf<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // optimization for edge case recursion
-        if buf.is_empty() {
-            return Ok(0);
-        }
         // make sure that we have enough spare capacity to fit the buf.len() bytes
         let available = self.header.capacity() - self.initialized;
         let count = buf.len();
@@ -77,8 +73,7 @@ impl Write for ExtBuf<'_> {
             return Ok(count);
         }
         // extend the buffer with the missing capacity
-        let required = buf.len() - available;
-        let Some(header) = self.ringal.alloc(required) else {
+        let Some(header) = self.ringal.alloc(count - available) else {
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
                 "allocator's capacity exhausted",

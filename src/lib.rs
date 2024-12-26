@@ -1,218 +1,117 @@
 #![deny(missing_docs)]
 
-//! RingAl - Efficient Ring Allocator for Short-lived Buffers
+//! # RingAl - A High-Performance Ring Allocator
 //!
-//! RingAl is a highly efficient ring allocator designed specifically for the
-//! allocation of short-lived buffers. The allocator operates in a circular manner,
-//! which allows for fast and inexpensive buffer allocations, provided they are
-//! ephemeral in nature. It is crucial that these allocations are short-lived;
-//! otherwise, the allocator may become clogged with long-lived allocations,
-//! rendering it inefficient.
+//! RingAl is a blazing-fast ring allocator optimized for short-lived buffer allocations. It uses a circular allocation pattern, which grants low-cost allocations as long as allocations are ephemeral. Long-lived allocations can degrade performance by clogging the allocator.
 //!
-//! # Primary Use Case:
+//! ## Key Features
 //!
-//! 1. **Preallocation**: Establish a backing store of size `N` bytes.
-//! 2. **Small Buffer Allocation**: Allocate buffers from the backing store, where
-//!    `M < N`.
-//! 3. **Buffer Utilization**: Use the allocated buffer across threads if
-//!    necessary. Buffers can be cloned efficiently, akin to using an `Arc`.
-//! 4. **Timely Deallocation**: Ensure buffers are dropped before the allocator
-//!    cycles back to the same memory region.
-//! 5. **Recycled Storage**: Upon buffer deallocation, the backing store becomes
-//!    available for subsequent allocations.
+//! 1. **Preallocation Strategy**: Establish a fixed-size backing store of `N` bytes.
+//! 2. **Efficient Small Buffer Management**: Allocate smaller buffers efficiently within the preallocated store.
+//! 3. **Thread-Safe Operations**: Buffers can be safely shared across threads, offering clone optimizations similar to `Arc`.
+//! 4. **Timely Buffer Deallocation**: Buffers should be dropped before the allocator wraps around to reuse the same memory, ensuring optimal recycling.
 //!
-//! RingAl library focuses on a robust and versatile memory management system, through the use of
-//! dynamic and self descriptive backing store. This system is engineered to accommodate a wide
-//! range of allocation requirements through the use of guard sequences. These guard sequences are
-//! capable of adjusting dynamically to different allocation conditions by being created, modified,
-//! and removed as necessary. The system effectively manages these memory guards using a single
-//! `usize` head pointer.
+//! RingAl focuses on efficient memory management with a dynamic memory pool that evolves its
+//! backing store using something called guard sequences. Guard sequences are usually exclusively
+//! owned by allocator when they are not locked (i.e. not guarding the allocation), and when they
+//! do become locked, the memory region (single usize) backing the guard sequence, is only accessed
+//! using Atomic operations. This allows for one thread (the owner of buffer) to release the guard
+//! (write to guard sequence), when the buffer is no longer in use and the other thread, where
+//! allocator is running, to perform synchronized check of whether guard sequence have been
+//! released.  
 //!
-//! The design is structured to ensure both safe and efficient multithreaded buffer operations. It
-//! grants exclusive write access to one thread while allowing another thread to read
-//! simultaneously. Although this design does inevitably lead to race conditions, particularly when
-//! the writing thread releases the buffer, without proper synchronization with reading or
-//! allocating thread, these issues are addressed through a method of optimistic availability
-//! checks. If the allocating thread finds a buffer in use, it returns `None`, indicating to the
-//! caller to retry the operation. This method avoids the need for expensive atomic synchronization
-//! by relying on eventual consistency, which is suitable for the use cases of this allocator.
+//! The design allows for safe multi-threaded access: one thread can write while one other can
+//! read. If a buffer is still occupied after allocator wraps around, the allocation attempt just
+//! returns `None`, prompting a retry.
 //!
-//! It is important to note that this allocator is not marked as `Sync`, which restricts its
-//! concurrent use across multiple threads. All allocation actions require `&mut self`, inherently
-//! preventing the allocator from being enclosed within an `Arc`. Using locks around the allocator
-//! is not recommended as it can greatly reduce performance; instead, it is advisable to use
-//! thread-local storage.
+//! Note: RingAl itself isn't `Sync`, so it cannot be accessed from multiple threads concurrently.
+//! Instead, using thread-local storage is encouraged.
 //!
-//! # Guard sequence insights:
+//! ## Allocation Strategies
 //!
-//! Each guard encodes:
-//! 1. A flag indicating whether the guarded memory region is in use.
-//! 2. The address of the next guard in the backing store.
+//! - **Exact Fit**: Perfectly matches the requested and available sizes.
+//! - **Oversized Guards**: Splits larger regions to fit the requested size, potentially causing fragmentation.
+//! - **Undersized Guards**: Merges smaller regions to accommodate requests, aiding in defragmentation.
+//! - **Capacity Constraints**: Fails if the backing store cannot satisfy the request, signaling with `None`.
 //!
-//! # Allocation Scenarios:
+//! ## Optional Features
+//! 1. **`tls` (Thread-Local Storage)**: Enables allocation requests without explicitly passing the allocator. It uses `RefCell` for thread-local data, offering convenience at a minor performance cost.
+//! 2. **`drop` (Early Deallocation)**: Allows the allocator to deallocate its resources upon request. If activated, it employs a `Drop` implementation that ensures no memory leaks by blocking until all buffers are released.
 //!
-//! When an allocation request is made, RingAl assesses the current guard, which
-//! can result in one of four scenarios:
+//! ## Usage Examples
 //!
-//! 1. **Exact Fit**: The requested size matches the guarded region. The guard is
-//!    marked as occupied, the pointer shifts to the next guard, and the buffer is
-//!    returned.
-//! 2. **Oversized Guard**: The guarded region exceeds the requested size. The
-//!    region is split, a new guard is established for the remainder, and the
-//!    buffer of the requested size is returned. This can lead to fragmentation.
-//! 3. **Undersized Guard**: The guarded region is smaller than required. The
-//!    allocator proceeds to merge subsequent regions until the requested size is
-//!    met, effectively defragmenting the storage. Only the initial guard persists.
-//! 4. **Insufficient Capacity**: Even after merging, the accumulated buffer is
-//!    insufficient. The allocation fails, returning `None`.
-//!
-//! ```plaintext
-//!    allocator
-//!       |
-//!       v
-//! -----------------------------------------------------------------------------------
-//! | head canary | N bytes | guard1 | L bytes | guard2 | M bytes | ... | tail canary |
-//! -----------------------------------------------------------------------------------
-//!      |                    ^   |              ^   |              ^ |          ^
-//!      |                    |   |              |   |              | |          |
-//!      ----------------------   ----------------   ---------------- ------------
-//!      ^                                                                       |
-//!      |                                                                       |
-//!      -------------------------------------------------------------------------
-//! ```
-//!
-//! _*Note*_: `Head` and `Tail` canaries are standard guard sequences that persist,
-//! with the `Tail` canary perpetually pointing to the `Head`, forming a circular
-//! (ring) structure.
-//!
-//! # Features
-//!
-//! 1. **Dynamic Fragmentation and Defragmentation**: Facilitates variable-size
-//!    allocations through adaptive backing store management.
-//! 2. **Extendable Buffers**: Allow dynamic reallocations akin to `Vec<u8>`,
-//!    typically inexpensive due to minimal pointer arithmetic and no data copy.
-//!    Such reallocations may fail if capacity limits are reached.
-//! 3. **Fixed-Size Buffers**: Unexpandable but more efficient due to simpler
-//!    design, with safe cross-thread transportation. They make storage available
-//!    upon deallocation.
-//! 4. **Read-Only Buffers**: Fixed-size buffers that are easily cloneable and
-//!    distributable across multiple threads. These involve an additional heap
-//!    allocation for a reference counter and should be avoided unless necessary to
-//!    prevent overhead.
-//!
-//! # Optional Crate Features (Cargo)
-//! 1. **`tls` (Thread-Local Storage):** This feature enables advanced
-//!    functionalities related to thread-local storage within the allocator. By
-//!    activating `tls`, developers can initiate allocation requests from any point
-//!    in the codebase, thereby eliminating the cumbersome need to pass the
-//!    allocator instance explicitly. This enhancement streamlines code ergonomics,
-//!    albeit with a slight performance trade-off due to the utilization of
-//!    `RefCell` for managing thread-local data.
-//! 2. **`drop` (Allocator Deallocation):** Typically, the allocator is designed to
-//!    remain active for the duration of the application's execution. However, in
-//!    scenarios where early deallocation of the allocator and its associated
-//!    resources is required, activating the `drop` feature is essential. This
-//!    feature implements a tailored `Drop` mechanism that blocks (by busy wating)
-//!    the executing thread until all associated allocations are conclusively
-//!    released, subsequently deallocating the underlying storage. It is critical
-//!    to ensure allocations do not extend significantly beyond the intended drop
-//!    point. Failure to enable this feature will result in a memory leak upon
-//!    attempting to drop the allocator.
-//!
-//! # Usage examples
-//! ## Extendable buffer
+//! ### Extendable Buffer
 //! ```rust
 //! # use std::io::Write;
 //! # use ringal::RingAl;
-//! let mut allocator = RingAl::new(1024); // Create an allocator with initial size
+//! let mut allocator = RingAl::new(1024);
 //! let mut buffer = allocator.extendable(64).unwrap();
-//! // the slice length exceeds preallocated capacity of 64
-//! let msg = b"hello world, this message is longer than allocated capacity, but buffer will
-//! grow as needed during the write, provided that allocator still has necessary capacity";
-//! // but we're still able to write the entire message, as the buffer grows dynamically
+//! let msg = b"hello world, this message is longer than allocated capacity...";
 //! let size = buffer.write(msg).unwrap();
-//! // until the ExtBuf is finalized or dropped no further allocations are possible
 //! let fixed = buffer.finalize();
 //! assert_eq!(fixed.as_ref(), msg);
 //! assert_eq!(fixed.len(), size);
 //! ```
-//! ## Fixed buffer
+//!
+//! ### Fixed Buffer
 //! ```rust
 //! # use std::io::Write;
 //! # use ringal::RingAl;
-//! let mut allocator = RingAl::new(1024); // Create an allocator with initial size
+//! let mut allocator = RingAl::new(1024);
 //! let mut buffer = allocator.fixed(256).unwrap();
-//! let size = buffer.write(b"hello world, this message is relatively short").unwrap();
-//! // we have written some some bytes
+//! let size = buffer.write(b"hello world, short message").unwrap();
 //! assert_eq!(buffer.len(), size);
-//! // but we still have some capacity left for more writes if necessary
 //! assert!(buffer.spare() >= 256 - size);
 //! ```
-//! ## Multi-threaded environment
+//!
+//! ### Multi-threaded Environment
 //! ```rust
 //! # use std::io::Write;
 //! # use std::sync::mpsc::channel;
 //! # use ringal::{ RingAl, FixedBufMut, FixedBuf };
-//!
-//! let mut allocator = RingAl::new(1024); // Create an allocator with initial size
+//! let mut allocator = RingAl::new(1024);
 //! let (tx, rx) = channel();
 //! let mut buffer = allocator.fixed(64).unwrap();
-//! let _ = buffer.write(b"this a message to other thread").unwrap();
-//! // send the buffer to another thread
+//! let _ = buffer.write(b"message to another thread").unwrap();
 //! let handle = std::thread::spawn(move || {
 //!     let buffer: FixedBufMut = rx.recv().unwrap();
-//!     // from another thread, freeze the buffer, making it readonly
 //!     let readonly = buffer.freeze();
-//!     let mut handles = Vec::with_capacity(16);
-//!     for i in 0..16 {
-//!         let (tx, rx) = channel();
-//!         // send the clones (cheap) of readonly buffer to more threads
-//!         let h = std::thread::spawn(move || {
-//!             let msg: FixedBuf = rx.recv().unwrap();
-//!             let msg = std::str::from_utf8(&msg[..]).unwrap();
-//!             println!("{i}. {msg}");
-//!         });
-//!         tx.send(readonly.clone());
-//!         handles.push(h);
-//!     }
-//!     for h in handles {
-//!         h.join();
+//!     for _ in 0..16 {
+//!         let msg: FixedBuf = readonly.clone();
+//!         let msg_str = std::str::from_utf8(&msg[..]).unwrap();
+//!         println!("{msg_str}");
 //!     }
 //! });
 //! tx.send(buffer);
-//! handle.join();
+//! handle.join().unwrap();
 //! ```
 //!
-//! ## Thread Local Storage
+//! ### Thread Local Storage
 //! ```rust
 //! # use ringal::ringal;
 //! # use std::io::Write;
+//! // init the thread local allocator, should be called just once, any thread
+//! // spawned afterwards, will have access to their own instance of the allocator
 //! ringal!(@init, 1024);
 //! // allocate fixed buffer
 //! let mut fixed = ringal!(@fixed, 64).unwrap();
 //! let _ = fixed.write(b"hello world!").unwrap();
-//! // allocate extendable buffer and write some data to it
-//! ringal!{@ext, 64, |mut extendable| {
+//! // allocate extendable buffer, and pass a callback to operate on it
+//! // this approach is necessary as ExtBuf contains reference to thread local storage,
+//! // and LocalKey doesn't allow any references to exist outside of access callback
+//! let fixed = ringal!{@ext, 64, |mut extendable| {
 //!     let _ = extendable.write(b"hello world!").unwrap();
+//!     // it's ok to return FixedBuf(Mut) from callback
 //!     extendable.finalize()
-//! }};
+//! }}.unwrap();
+//! println!("bytes written: {}", fixed.len());
 //! ```
 //!
+//! ## Safety Considerations
 //!
-//! # Dependencies
-//! The crate is designed without any external dependencies, and only relies on standard library
-//!
-//! # Planned features
-//! - Allocation of buffers with generic types
-//!
-//! # Safety
-//! This library is the epitome of cautious engineering! Well, that's what we'd
-//! love to claim, but the truth is it's peppered with `unsafe` blocks. At times,
-//! it seems like the code is channeling its inner C spirit, with raw pointer
-//! operations lurking around every corner. But in all seriousness, considerable
-//! effort has been devoted to ensuring that the safe API exposed by this crate is
-//! truly safe for users and doesn't invite any unwelcome Undefined Behaviors or
-//! other nefarious calamities. Proceed with confidence...
+//! While `unsafe` code is used for performance reasons, the public API is designed to be safe.
+//! Significant efforts have been made to ensure no undefined behavior occurs, offering a safe
+//! experience for end-users.
 
 use std::alloc::{alloc, Layout};
 
