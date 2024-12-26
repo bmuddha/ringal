@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::USIZELEN;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
@@ -27,10 +29,13 @@ impl Header {
         Self((unsafe { *self.0 } >> 1) as *mut usize)
     }
 
-    /// checks whether or not guarded memory region is locked
+    /// checks whether or not guarded memory region is locked this method is always invoked first
+    /// before accessing the guarded value, and an atomic check ensures that concurrent access
+    /// (with potentially other thread, which will release the guard) is synchronized
     #[inline(always)]
     pub(crate) fn available(&self) -> bool {
-        (unsafe { *(self.0) }) & 1 == 0
+        let atomic = self.0 as *const AtomicUsize;
+        (unsafe { &*atomic }).load(Ordering::Relaxed) & 1 == 0
     }
 
     /// distance (in `size_of<usize>()`) to given guard
@@ -65,21 +70,20 @@ impl From<Header> for Guard {
 
 impl Drop for Guard {
     #[inline(always)]
+    // Releases the lock from the specified memory region, thereby making it available for the
+    // allocator.
     fn drop(&mut self) {
-        // releases the lock from the specified memory region, thereby making it available for the allocator.
         //
-        // # safety and ordering guarantees
+        // # Safety and Ordering Guarantees
         //
-        // the operation of releasing the lock is non-atomic and migth cause race conditions in
-        // multithreaded context. It is ensured that the caller of `drop` is the sole entity
-        // capable of writing to the region at this point in the execution timeline. Furthermore,
-        // the compiler enforces strict ordering such that this operation cannot be reordered with
-        // other operations that might utilize this memory region.
+        // The operation of releasing the lock utilizes atomic instructions to ensure proper
+        // synchronization in a multithreaded context. The use of atomic operations prevents race
+        // conditions, ensuring that modifications to the lock are safely visible to other threads.
         //
-        // importantly, the allocator is restricted from accessing the region until it is fully released.
-        // While there may be a delay in the visibility of this operation to the allocator due to CPU caching,
-        // the change will eventually propagate to the allocator's thread. Consequently, potential race conditions
-        // are effectively mitigated by these guarantees, ensuring correctness and eventual consistency.
-        *self.0 &= usize::MAX << 1;
+        // The caller of `drop` is the sole entity capable of writing to the region at this point
+        // in the execution timeline. Importantly, the allocator is restricted from write access
+        // the region until it is released.
+        let atomic = self.0 as *mut usize as *const AtomicUsize;
+        unsafe { &*atomic }.fetch_and(usize::MAX << 1, Ordering::Release);
     }
 }

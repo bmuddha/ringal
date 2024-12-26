@@ -1,59 +1,79 @@
-# RingAl - Efficient Ring Allocator for Short-lived Buffers
+# RingAl - Fast Ring Allocator for Temporary Buffers
 
 [![Crates.io](https://img.shields.io/crates/v/ringal.svg)](https://crates.io/crates/ringal)
 [![Documentation](https://docs.rs/ringal/badge.svg)](https://docs.rs/ringal)
 [![Build Status](https://github.com/bmuddha/ringal/actions/workflows/test.yml/badge.svg)](https://github.com/bmuddha/ringal/actions)
 
+## Table of Contents
+1. [Overview](#overview)
+   - Key Use Cases
+2. [Design Philosophy](#design-philosophy)
+   - Guard Mechanics
+   - Allocation Scenarios
+3. [Key Features](#key-features)
+4. [Optional Crate Features (Cargo)](#optional-crate-features-cargo)
+5. [Usage Examples](#usage-examples)
+   - Extendable Buffer
+   - Fixed Buffer
+   - Multi-threaded Environment
+   - Thread Local Storage
+6. [Benchmarks](#benchmarks)
+   - Parameter Definitions
+   - Fixed Preallocated Buffer Results
+   - Extendable Buffer Results (Chunked Writes)
+   - Key Insights
+   - System Specs
+7. [Dependencies](#dependencies)
+8. [Future Plans](#future-plans)
+9. [Safety](#safety)
+
 ## Overview
 
-**RingAl** is a highly efficient ring allocator designed specifically for the
-allocation of short-lived buffers. The allocator operates in a circular manner,
-which allows for fast and inexpensive buffer allocations, provided they are
-ephemeral in nature. It is crucial that these allocations are short-lived;
-otherwise, the allocator may become clogged with long-lived allocations,
-rendering it inefficient.
+**RingAl** is a high-performance ring allocator designed for quick buffer allocations that don't live long. It uses a circular allocation method for fast memory management, which is perfect for short-lived buffers. For best performance, buffers should be freed quickly to avoid slowing things down by jamming the allocator.
 
-### Primary Use Case:
+### Key Use Cases:
 
-1. **Preallocation**: Establish a backing store of size `N` bytes.
-2. **Small Buffer Allocation**: Allocate buffers from the backing store, where
-   `M < N`.
-3. **Buffer Utilization**: Use the allocated buffer across threads if
-   necessary. Buffers can be cloned efficiently, akin to using an `Arc`.
-4. **Timely Deallocation**: Ensure buffers are dropped before the allocator
-   cycles back to the same memory region.
-5. **Recycled Storage**: Upon buffer deallocation, the backing store becomes
-   available for subsequent allocations.
+1. **Preallocation**: Set up a memory pool with a defined size `N` bytes.
+2. **Small Buffer Allocation**: Allocate small buffers from the pool, each less than `N`.
+3. **Cross-thread Buffer Usage**: Share buffers across threads efficiently using lightweight cloning, similar to `Arc`.
+4. **Timely Deallocation**: Release buffers before reusing the same memory, for performance.
+5. **Recycling Storage**: Freed buffers automatically go back into the pool for reallocation.
 
 # Design Philosophy
-RingAl library focuses on a robust and versatile memory management system, through the use of dynamic and self descriptive backing store. This system is engineered to accommodate a wide range of allocation requirements through the use of guard sequences. These guard sequences are capable of adjusting dynamically to different allocation conditions by being created, modified, and removed as necessary. The system effectively manages these memory guards using a single `usize` head pointer.
 
-The design is structured to ensure both safe and efficient multithreaded buffer operations. It grants exclusive write access to one thread while allowing another thread to read simultaneously. Although this design does inevitably lead to race conditions, particularly when the writing thread releases the buffer, without proper synchronization with reading or allocating thread, these issues are addressed through a method of optimistic availability checks. If the allocating thread finds a buffer in use, it returns `None`, indicating to the caller to retry the operation. This method avoids the need for expensive atomic synchronization by relying on eventual consistency, which is suitable for the use cases of this allocator.
+RingAl focuses on efficient memory management with a dynamic memory pool that
+evolves its backing store using something called guard sequences. Guard
+sequences are usually exclusively owned by allocator when they are not locked
+(i.e. not guarding the allocation), and when they do become locked, the memory
+region (single usize) backing the guard sequence, is only accessed using Atomic
+operations. This allows for one thread (the owner of buffer) to release the
+guard (write to guard sequence), when the buffer is no longer in use and the
+other thread, where allocator is running, to t perform synchronized check of
+whether guard sequence have been released.  
 
-It is important to note that this allocator is not marked as `Sync`, which restricts its concurrent use across multiple threads. All allocation actions require `&mut self`, inherently preventing the allocator from being enclosed within an `Arc`. Using locks around the allocator is not recommended as it can greatly reduce performance; instead, it is advisable to use thread-local storage.
 
-### Guard Insights:
+The design allows for safe multi-threaded access: one thread can write while
+one other can read. If a buffer is still occupied after allocator wraps around,
+the allocation attempt just returns `None`, prompting a retry.
 
-Each guard encodes:
-1. A flag indicating whether the guarded memory region is in use.
-2. The address of the next guard in the backing store.
+Note: RingAl itself isn't `Sync`, so it cannot be accessed from multiple
+threads concurrently. Instead, using thread-local storage is encouraged.
 
-### Allocation Scenarios:
+## Guard Mechanics:
 
-When an allocation request is made, RingAl assesses the current guard, which
-can result in one of four scenarios:
+Guards help manage memory by indicating:
 
-1. **Exact Fit**: The requested size matches the guarded region. The guard is
-   marked as occupied, the pointer shifts to the next guard, and the buffer is
-   returned.
-2. **Oversized Guard**: The guarded region exceeds the requested size. The
-   region is split, a new guard is established for the remainder, and the
-   buffer of the requested size is returned. This can lead to fragmentation.
-3. **Undersized Guard**: The guarded region is smaller than required. The
-   allocator proceeds to merge subsequent regions until the requested size is
-   met, effectively defragmenting the storage. Only the initial guard persists.
-4. **Insufficient Capacity**: Even after merging, the accumulated buffer is
-   insufficient. The allocation fails, returning `None`.
+1. Whether guarded memory is currently in use.
+2. Address of the next guard in the memory pool.
+
+## Allocation Scenarios:
+
+When you request memory, RingAl checks the current guard and does one of the following:
+
+1. **Exact Fit**: Uses the guard if it matches the request size, marking memory as used.
+2. **Oversized Guard**: Splits the guard if it's larger than needed, which might fragment memory.
+3. **Undersized Guard**: Combines adjacent regions until the request is satisfied, which helps defragment the memory.
+4. **Insufficient Capacity**: Returns `None` if it can't satisfy the request, even after merging.
 
 ```plaintext
    allocator
@@ -70,86 +90,60 @@ can result in one of four scenarios:
      -------------------------------------------------------------------------
 ```
 
-_*Note*_: `Head` and `Tail` canaries are standard guard sequences that persist,
-with the `Tail` canary perpetually pointing to the `Head`, forming a circular
-(ring) structure.
+_Note_: `Head` and `Tail` canaries are fixed regular guards, with the exception that they always persist, and Tail guard always points to Head, forming a ring.
 
-## Features
+## Key features
 
-1. **Dynamic Fragmentation and Defragmentation**: Facilitates variable-size
-   allocations through adaptive backing store management.
-2. **Extendable Buffers**: Allow dynamic reallocations akin to `Vec<u8>`,
-   typically inexpensive due to minimal pointer arithmetic and no data copy.
-   Such reallocations may fail if capacity limits are reached.
-3. **Fixed-Size Buffers**: Unexpandable but more efficient due to simpler
-   design, with safe cross-thread transportation. They make storage available
-   upon deallocation.
-4. **Read-Only Buffers**: Fixed-size buffers that are easily cloneable and
-   distributable across multiple threads. These involve an additional heap
-   allocation for a reference counter and should be avoided unless necessary to
-   prevent overhead.
+1. **Dynamic Fragmentation Handling**: Manages different allocation sizes with adaptive memory handling.
+2. **Expandable Buffers**: Can grow like `Vec<u8>`, unless it hits capacity limits.
+3. **Fixed-Size Buffers**: Efficient, fixed sized buffer, but can be sent across threads.
+4. **Read-Only Buffers**: Cloneable and shareable across threads. They're
+   efficient but involve extra heap allocation for reference counting, so use
+   them wisely.
+5. **Thread local storage allocator**: allocator instance can be created for
+   each thread, and accessed from anywhere in the code, removeing the need to
+   pass the allocator around
 
-For more details, visit the [RingAl Documentation](https://docs.rs/ringal).
+For more details, check the [RingAl Documentation](https://docs.rs/ringal).
 
 ## Optional Crate Features (Cargo)
-1. **`tls` (Thread-Local Storage):** This feature enables advanced
-   functionalities related to thread-local storage within the allocator. By
-   activating `tls`, developers can initiate allocation requests from any point
-   in the codebase, thereby eliminating the cumbersome need to pass the
-   allocator instance explicitly. This enhancement streamlines code ergonomics,
-   albeit with a slight performance trade-off due to the utilization of
-   `RefCell` for managing thread-local data.
-2. **`drop` (Allocator Deallocation):** Typically, the allocator is designed to
-   remain active for the duration of the application's execution. However, in
-   scenarios where early deallocation of the allocator and its associated
-   resources is required, activating the `drop` feature is essential. This
-   feature implements a tailored `Drop` mechanism that blocks (by busy wating)
-   the executing thread until all associated allocations are conclusively
-   released, subsequently deallocating the underlying storage. It is critical
-   to ensure allocations do not extend significantly beyond the intended drop
-   point. Failure to enable this feature will result in a memory leak upon
-   attempting to drop the allocator.
+1. **`tls` (Thread-Local Storage):** Adds thread-local storage, simplifying allocation calls, but might slow things slightly due to `RefCell` usage.
+2. **`drop` (Allocator Deallocation):** Normally, the allocator lives for the app's duration, but this feature allows early deallocation when needed. It waits for all allocations to finish before freeing memory to prevent leaks, blocks the thread if there're active allocations.
 
-## Usage examples
-### Extendable buffer
+# Usage Examples
+
+## Extendable Buffer
 ```rust
 let mut allocator = RingAl::new(1024); // Create an allocator with initial size
 let mut buffer = allocator.extendable(64).unwrap();
-// the slice length exceeds preallocated capacity of 64
-let msg = b"hello world, this message is longer than allocated capacity, but buffer will
-grow as needed during the write, provided that allocator still has necessary capacity";
-// but we're still able to write the entire message, as the buffer grows dynamically
+let msg = b"hello world, this message is longer than the allocated capacity but will grow as needed.";
 let size = buffer.write(msg).unwrap();
-// until the ExtBuf is finalized or dropped no further allocations are possible
 let fixed = buffer.finalize();
 assert_eq!(fixed.as_ref(), msg);
 assert_eq!(fixed.len(), size);
 ```
-### Fixed buffer
+
+## Fixed Buffer
 ```rust
 let mut allocator = RingAl::new(1024); // Create an allocator with initial size
 let mut buffer = allocator.fixed(256).unwrap();
 let size = buffer.write(b"hello world, this message is relatively short").unwrap();
-// we have written some some bytes 
 assert_eq!(buffer.len(), size);
-// but we still have some capacity left for more writes if necessary
 assert_eq!(buffer.spare(), 256 - size);
 ```
-### Multi-threaded environment
+
+## Multi-threaded Environment
 ```rust
 let mut allocator = RingAl::new(1024); // Create an allocator with initial size
 let (tx, rx) = channel();
 let mut buffer = allocator.fixed(64).unwrap();
-let _ = buffer.write(b"this a message to other thread").unwrap();
-// send the buffer to another thread
+let _ = buffer.write(b"message to another thread").unwrap();
 let handle = std::thread::spawn(move || {
     let buffer = rx.recv().unwrap();
-    // from another thread, freeze the buffer, making it readonly
     let readonly = buffer.freeze();
     let mut handles = Vec::with_capacity(16);
     for i in 0..16 {
         let (tx, rx) = channel();
-        // send the clones (cheap) of readonly buffer to more threads
         let h = std::thread::spawn(move || {
             let msg = rx.recv().unwrap();
             let msg = std::str::from_utf8(&msg[..]).unwrap();
@@ -166,94 +160,78 @@ tx.send(buffer);
 handle.join();
 ```
 
-### Thread Local Storage 
+## Thread Local Storage 
 ```rust
+// init the thread local allocator, should be called just once, any thread
+spawned afterwards, will have access to their own instance of the allocator
 ringal!(@init, 1024);
 // allocate fixed buffer
 let mut fixed = ringal!(@fixed, 64).unwrap();
 let _ = fixed.write(b"hello world!").unwrap();
-// allocate extendable buffer and write some data to it
-ringal!{@ext, 64, |extendable| {
+// allocate extendable buffer, and pass a callback to operate on it
+// this approach is necessary as ExtBuf contains reference to thread local storage, 
+// and LocalKey doesn't allow any references to exist outside of access callback 
+let fixed = ringal!{@ext, 64, |extendable| {
     let _ = extendable.write(b"hello world!").unwrap();
+    // it's ok to return FixedBuf(Mut) from callback
     extendable.finalize()
 }};
+println!("bytes written: {}", fixed.len());
 ```
 
 # Benchmarks
 
-Benchmark comparisons are made between two buffer allocator implementations:
-`RingAl` and `System allocator` used by `Vec<u8>`. The benchmarks measure
-performance across different scenarios with varying parameters.
+Comparisons between `RingAl` and the system allocator (`Vec<u8>`) show performance gains in various scenarios.
 
-## Parameters Explanation
+## Parameter Definitions
 - **Iterations**: Number of operations performed
-- **Buffer Size**: Maximum number of bytes that could be written to buffer, the actual number is random
-- **Max Buffers**: Maximum number of buffers that are kept around after allocation
+- **Buffer Size**: Maximum bytes written per buffer, the actual number is random
+- **Max Buffers**: Maximum number of buffers held after allocation
 
 ## Fixed Preallocated Buffer Results
-*Scenario:*
-1. Allocate the buffer with respective allocator, the buffer capacity is equal
-   to or greater than the size of data to be written
-2. Write random number of bytes via `Write` trait implementation, upper limit
-   is capped at `Buffer Size`
-3. Send the buffer to another thread via unbounded channel, to prevent immediate deallocation
-4. After enough buffers are collected on other thread, drop them all in one batch
-5. Perform this sequence `Iterations` times
 
-| Iterations | Buffer Size | Max Buffers | ringal (ms) | vec (ms) | Speed Improvement |
-|------------|-------------|-------------|-------------|----------|-------------------|
-| 10,000,000 | 64         | 64          | 696.7       | 998.0    | 1.43x            |
-| 10,000,000 | 1,024      | 64          | 923.4       | 2,062.0  | 2.23x            |
-| 10,000,000 | 1,024      | 1,024       | 913.7       | 1,622.0  | 1.77x            |
-| 1,000,000  | 65,536     | 64          | 932.6       | 1,718.0  | 1.84x            |
-| 1,000,000  | 131,072    | 1,024       | 1,709.0     | 3,960.0  | 2.32x            |
+| Iterations | Buffer Size | Max Buffers | ringal (ms) | vec (ms) | Improvement |
+|------------|-------------|-------------|-------------|----------|-------------|
+| 10,000,000 | 64         | 64          | 696.7       | 998.0    | 1.43x      |
+| 10,000,000 | 1,024      | 64          | 923.4       | 2,062.0  | 2.23x      |
+| 10,000,000 | 1,024      | 1,024       | 913.7       | 1,622.0  | 1.77x      |
+| 1,000,000  | 65,536     | 64          | 932.6       | 1,718.0  | 1.84x      |
+| 1,000,000  | 131,072    | 1,024       | 1,709.0     | 3,960.0  | 2.32x      |
 
 ## Extendable Buffer Results (Chunked Writes)
-*Scenario:*
-1. Create an empty buffer with respective allocator, the buffer capacity is 0
-2. Write random number of bytes via `Write` trait implementation, upper limit
-   is capped at `Buffer Size`, the writes are performed in chunks of 64 bytes,
-   forcing the buffers to grow dynamically and keep reallocating.
-3. Send the buffer to another thread via unbounded channel, to prevent
-   immediate deallocation
-4. After enough buffers are collected on other thread, drop them all in one batch
-5. Perform this sequence `Iterations` times
 
-| Iterations | Buffer Size | Max Buffers | ringal (ms) | vec (ms) | Speed Improvement |
-|------------|-------------|-------------|-------------|----------|-------------------|
-| 10,000,000 | 64         | 64          | 834.0       | 1,120.0  | 1.34x            |
-| 10,000,000 | 1,024      | 64          | 1,164.0     | 3,228.0  | 2.77x            |
-| 10,000,000 | 1,024      | 1,024       | 1,205.0     | 3,044.0  | 2.53x            |
-| 1,000,000  | 65,536     | 64          | 1,958.0     | 3,646.0  | 1.86x            |
-| 1,000,000  | 131,072    | 1,024       | 3,588.0     | 9,008.0  | 2.51x            |
+| Iterations | Buffer Size | Max Buffers | ringal (ms) | vec (ms) | Improvement |
+|------------|-------------|-------------|-------------|----------|-------------|
+| 10,000,000 | 64         | 64          | 834.0       | 1,120.0  | 1.34x      |
+| 10,000,000 | 1,024      | 64          | 1,164.0     | 3,228.0  | 2.77x      |
+| 10,000,000 | 1,024      | 1,024       | 1,205.0     | 3,044.0  | 2.53x      |
+| 1,000,000  | 65,536     | 64          | 1,958.0     | 3,646.0  | 1.86x      |
+| 1,000,000  | 131,072    | 1,024       | 3,588.0     | 9,008.0  | 2.51x      |
 
-## Key Findings
+## Key Insights
 
-1. The `ringal` implementation consistently outperforms the `vec` implementation across all test scenarios
-2. Performance improvements range from 1.34x to 2.77x faster
-3. Largest performance gains are observed with larger buffer sizes
-4. Both fixed preallocated and extendable buffer scenarios show significant improvements
+1. `RingAl` consistently beats `Vec<u8>` in all cases.
+2. Gains range from 1.34x to 2.77x.
+3. Bigger buffers show the most improvement.
+4. Both fixed and extendable buffers show significant speedups.
 
-## System Information
+## System Specs
 
-All benchmarks were run using hyperfine with 10 runs per test case. Times shown are mean values.
+Benchmarks done with hyperfine, running each case 10 times. Shown times are averages.
 
-This setup was used to run all benchmarks mentioned in this document:
 - **Device:** Apple MacBook Air
 - **Processor:** Apple M2
 - **Memory:** 16 GB RAM
 
-## Dependencies
-The crate is designed without any external dependencies, and only relies on standard library
+# Dependencies
+RingAl doesn't rely on any third-party crates, only the Rust standard library.
 
-## Planned features
-- Allocation of buffers with generic types
+# Future Plans
+- Support for generic type buffer allocations.
 
 # Safety
-This library is the epitome of cautious engineering! Well, that's what we'd
-love to claim, but the truth is it's peppered with `unsafe` blocks. At times,
-it seems like the code is channeling its inner C spirit, with raw pointer
-operations lurking around every corner. But in all seriousness, considerable
-effort has been devoted to ensuring that the safe API exposed by this crate is
-truly safe for users and doesn't invite any unwelcome Undefined Behaviors or
-other nefarious calamities. Proceed with confidence...
+The implementation uses a lot of unsafe Rust, this is an allocator after all,
+so raw pointers are inevitable (some parts of code look like they were written
+in C :)). A lot of effort was put into ensuring that the code is safe from UB
+and data races, and the API is safe to use. Nonetheless all contributions to
+making it even safer are always welcome. 
