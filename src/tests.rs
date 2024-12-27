@@ -1,11 +1,17 @@
+#![allow(unused)]
+
 use std::{
-    collections::VecDeque, io::Write, mem::transmute, sync::mpsc::sync_channel, time::Instant,
+    collections::{HashSet, VecDeque},
+    io::Write,
+    mem::transmute,
+    sync::mpsc::sync_channel,
+    time::Instant,
 };
 
 use crate::{
     buffer::FixedBuf,
     header::{Guard, Header},
-    RingAl, MINALLOC, USIZELEN,
+    RingAl, MINALLOC, USIZEALIGN, USIZELEN,
 };
 
 const SIZE: usize = 4096;
@@ -58,7 +64,7 @@ fn test_init() {
 fn test_alloc() {
     let (mut ringal, _g) = setup!();
     let start = ringal.head;
-    let header = ringal.alloc(1024);
+    let header = ringal.alloc(1024, USIZEALIGN);
     assert!(
         header.is_some(),
         "should be able to allocate with new allocator"
@@ -75,7 +81,7 @@ fn test_multi_alloc() {
     let mut allocations = Vec::<Guard>::with_capacity(COUNT);
     for i in 0..COUNT {
         let size = SIZE / COUNT - USIZELEN * 2 - (i == COUNT - 1) as usize * USIZELEN;
-        let header = ringal.alloc(size);
+        let header = ringal.alloc(size, USIZEALIGN);
         assert!(
             header.is_some(),
             "should have enough capacity for all allocations"
@@ -84,10 +90,10 @@ fn test_multi_alloc() {
         header.set();
         allocations.push(header.into());
     }
-    let header = ringal.alloc(SIZE / COUNT - USIZELEN);
+    let header = ringal.alloc(SIZE / COUNT - USIZELEN, USIZEALIGN);
     assert!(header.is_none(), "should have run out of capacity");
     allocations.clear();
-    let header = ringal.alloc(SIZE / COUNT - USIZELEN);
+    let header = ringal.alloc(SIZE / COUNT - USIZELEN, USIZEALIGN);
     assert!(
         header.is_some(),
         "should have all capacity after dropping allocations"
@@ -95,13 +101,13 @@ fn test_multi_alloc() {
 }
 
 #[test]
-fn test_continious_alloc() {
+fn test_continuous_alloc() {
     let (mut ringal, _g) = setup!();
     const ITERS: u64 = 8192;
     let mut allocations = VecDeque::<Guard>::with_capacity(4);
     for i in 0..ITERS {
-        let size = (unsafe { transmute::<Instant, (u64, u64)>(Instant::now()) }.0 * i) % 256;
-        let header = ringal.alloc(size as usize);
+        let size = (unsafe { transmute::<Instant, (u64, u32)>(Instant::now()) }.0 * i) % 256;
+        let header = ringal.alloc(size as usize, USIZEALIGN);
         assert!(header.is_some(), "should always have capacity");
         let header = header.unwrap();
         header.set();
@@ -172,7 +178,7 @@ fn test_ext_buf_continuous_alloc() {
     let mut buffers = VecDeque::with_capacity(4);
     const ITERS: usize = 8192;
     for i in 0..ITERS {
-        let random = unsafe { transmute::<Instant, (usize, usize)>(Instant::now()).0 };
+        let random = unsafe { transmute::<Instant, (usize, u32)>(Instant::now()).0 };
         let mut size = (random * i) % 256;
         if size < MINALLOC * USIZELEN {
             size = 256 - size
@@ -262,7 +268,7 @@ fn test_fixed_buf_continuous_alloc() {
     let mut buffers = VecDeque::with_capacity(4);
     const ITERS: usize = 8192;
     for i in 0..ITERS {
-        let random = unsafe { transmute::<Instant, (usize, usize)>(Instant::now()).0 };
+        let random = unsafe { transmute::<Instant, (usize, u32)>(Instant::now()).0 };
         let mut size = (random * i) % 256;
         if size < MINALLOC * USIZELEN {
             size = 256 - size
@@ -306,7 +312,7 @@ fn test_fixed_buf_continuous_alloc_multi_thread() {
         threads.push(tx);
     }
     for i in 0..ITERS {
-        let random = unsafe { transmute::<Instant, (usize, usize)>(Instant::now()).0 };
+        let random = unsafe { transmute::<Instant, (usize, u32)>(Instant::now()).0 };
         let mut size = (random * i) % 256;
         if size < MINALLOC * USIZELEN {
             size = 256 - size
@@ -362,4 +368,90 @@ fn test_thread_local_allocator() {
         assert_eq!(extended.unwrap().len(), MSGLEN);
     }
     some_fn();
+}
+
+macro_rules! test_generic_buf {
+    ($int: ty) => {
+        let (mut ringal, _g) = setup!();
+        const ITERS: $int = 3;
+        struct SomeType {
+            i: $int,
+            string: FixedBuf,
+        }
+        let mut string = ringal.fixed(64).unwrap();
+        let _ = string.write(b"hello world").unwrap();
+        let string = string.freeze();
+        let buffer = ringal.generic::<SomeType>(ITERS as usize);
+        assert!(
+            buffer.is_some(),
+            "should be able to allocate generic buf with new allocator"
+        );
+        let mut buffer = buffer.unwrap();
+        for i in 0..ITERS {
+            let instance = SomeType {
+                i,
+                string: string.clone(),
+            };
+            assert!(buffer.push(instance).is_none());
+        }
+        assert_eq!(buffer.len(), ITERS as usize);
+        for i in (0..ITERS).rev() {
+            let elem = buffer.pop();
+            assert!(elem.is_some(), "buffer should pop all pushed elements");
+            let elem = elem.unwrap();
+            assert_eq!(elem.i, i);
+            assert_eq!(elem.string.as_ref(), string.as_ref());
+            assert!(buffer.insert(elem, 0).is_none());
+        }
+        assert_eq!(buffer.len(), ITERS as usize);
+        for _ in 0..ITERS {
+            let elem = buffer.swap_remove(0);
+            assert!(
+                elem.is_some(),
+                "buffer should swap remove all pushed elements"
+            );
+            let elem = elem.unwrap();
+            buffer.push(elem);
+        }
+        assert_eq!(buffer.len(), ITERS as usize);
+        let mut indices: HashSet<$int> = (0..ITERS).into_iter().collect();
+        for _ in 0..ITERS {
+            let elem = buffer.remove(0);
+            assert!(
+                elem.is_some(),
+                "buffer should swap remove all pushed elements"
+            );
+            let removed = &elem.unwrap().i;
+            println!("{} removing {removed}", stringify!($int));
+            assert!(indices.remove(&removed));
+        }
+        assert_eq!(buffer.len(), 0);
+        drop(string);
+        drop(buffer);
+    };
+}
+
+//#[cfg(feature = "generic")]
+#[test]
+fn test_generic_buf_word() {
+    test_generic_buf!(usize);
+}
+
+#[test]
+fn test_generic_buf_double_word_align() {
+    test_generic_buf!(u128);
+}
+#[test]
+fn test_generic_buf_half_word_align() {
+    test_generic_buf!(u32);
+}
+
+#[test]
+fn test_generic_buf_quarter_word_align() {
+    test_generic_buf!(u16);
+}
+
+#[test]
+fn test_generic_buf_eighth_word_align() {
+    test_generic_buf!(u8);
 }

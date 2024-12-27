@@ -100,7 +100,9 @@ _Note_: `Head` and `Tail` canaries are fixed regular guards, with the exception 
 4. **Read-Only Buffers**: Cloneable and shareable across threads. They're
    efficient but involve extra heap allocation for reference counting, so use
    them wisely.
-5. **Thread local storage allocator**: allocator instance can be created for
+5. Generic `Vec<T>` like fixed capacity buffers, these can be allocated from
+   the same backing store as regular `u8` buffers
+6. **Thread local storage allocator**: allocator instance can be created for
    each thread, and accessed from anywhere in the code, removeing the need to
    pass the allocator around
 
@@ -130,6 +132,21 @@ let mut buffer = allocator.fixed(256).unwrap();
 let size = buffer.write(b"hello world, this message is relatively short").unwrap();
 assert_eq!(buffer.len(), size);
 assert_eq!(buffer.spare(), 256 - size);
+```
+
+## Generic Buffer
+```rust
+let mut allocator = RingAl::new(1024); // Create an allocator with initial size
+struct MyType {
+    field1: usize,
+    field2: u128
+}
+let mut buffer = allocator.generic::<MyType>(16).unwrap();
+buffer.push(MyType { field1: 42, field2: 43 });
+assert_eq!(buffer.len(), 1);
+let t = buffer.pop().unwrap();
+assert_eq!(t.field1, 42);
+assert_eq!(t.field2, 43);
 ```
 
 ## Multi-threaded Environment
