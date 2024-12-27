@@ -130,7 +130,7 @@
 //! Significant efforts have been made to ensure no undefined behavior occurs, offering a safe
 //! experience for end-users.
 
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{alloc, Layout};
 
 pub use buffer::{ExtBuf, FixedBuf, FixedBufMut, GenericBufMut};
 use header::Header;
