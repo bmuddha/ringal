@@ -113,8 +113,9 @@
 //! Significant efforts have been made to ensure no undefined behavior occurs, offering a safe
 //! experience for end-users.
 
-use std::alloc::{alloc, Layout};
+use std::alloc::{alloc, dealloc, Layout};
 
+use buffer::GenericBufMut;
 pub use buffer::{ExtBuf, FixedBuf, FixedBufMut};
 use header::Header;
 
@@ -129,6 +130,7 @@ const USIZELEN: usize = size_of::<usize>();
 /// capacity to multiple of 8 machine words (converted to byte count)
 const MINALLOC: usize = 8;
 const DEFAULT_ALIGNMENT: usize = 64;
+const USIZEALIGN: usize = align_of::<usize>();
 
 impl RingAl {
     /// Initialize ring allocator with given capacity and default alignment. Allocated capacity
@@ -169,7 +171,7 @@ impl RingAl {
     /// `None`, if backing store doesn't have enough capacity available.
     #[inline(always)]
     pub fn fixed(&mut self, size: usize) -> Option<FixedBufMut> {
-        let header = self.alloc(size)?;
+        let header = self.alloc(size, USIZEALIGN)?;
         header.set();
         let ptr = header.buffer();
         let capacity = header.capacity();
@@ -189,7 +191,7 @@ impl RingAl {
     /// allocator (used to dynamically grow the buffer), which effectively
     /// prevents any further allocations while this buffer is around
     pub fn extendable(&mut self, size: usize) -> Option<ExtBuf<'_>> {
-        let header = self.alloc(size)?;
+        let header = self.alloc(size, USIZEALIGN)?;
         header.set();
         Some(ExtBuf {
             header,
@@ -199,18 +201,36 @@ impl RingAl {
         })
     }
 
-    /// Try to lock at least `size` bytes from backing store
-    fn alloc(&mut self, mut size: usize) -> Option<Header> {
+    /// Allocate a fixed buffer, that can accomodate `count` elements of type T
+    pub fn generic<T>(&mut self, count: usize) -> Option<GenericBufMut<T>> {
+        let tsize = size_of::<T>();
+        let size = count * tsize;
+        let header = self.alloc(size, align_of::<T>())?;
+        header.set();
+        let buffer = header.buffer();
+        let offset = buffer.align_offset(align_of::<T>());
+        let inner = unsafe { buffer.add(offset) } as *mut T;
+        let inner = unsafe { std::slice::from_raw_parts_mut(inner, count) };
+        Some(GenericBufMut {
+            _guard: header.into(),
+            inner,
+            initialized: 0,
+        })
+    }
+
+    /// Try to lock at least `size` bytes from backing store, aligning them to requested address
+    fn alloc(&mut self, mut size: usize, align: usize) -> Option<Header> {
         // we need to convert the size from count of bytes to count of usizes
         size = size / USIZELEN + 1;
         // begin accumulating capacity
         let mut start = Header(self.head);
+        let mut offset = start.buffer().align_offset(align) / USIZELEN;
         let mut accumulated = 0;
         let mut next = start;
         // when the current guard sequence references a memory region smaller than the requested size,
         // an attempt is made to merge subsequent regions. This process continues until the required
         // capacity is satisfied or all available capacity is exhausted.
-        while accumulated < size {
+        while accumulated < size + offset {
             next.available().then_some(())?;
             next = next.next();
             accumulated = start.distance(&next);
@@ -225,6 +245,7 @@ impl RingAl {
             if next < start {
                 accumulated = 0;
                 start = next;
+                offset = start.buffer().align_offset(align) / USIZELEN;
             }
         }
         // If the difference between the accumulated capacity and the requested size is less than
@@ -310,10 +331,10 @@ impl Drop for RingAl {
             let nnext = next.next();
             // Check for possible wrap-around
             if nnext > next {
-                capacity += next.capacity() / USIZELEN;
+                capacity += next.capacity();
             }
             // Increment capacity to account for guard size
-            capacity += 1;
+            capacity += USIZELEN;
             next = nnext;
             // If we have looped back to the starting point, all allocations
             // are released, and the full capacity is recalculated
@@ -323,13 +344,13 @@ impl Drop for RingAl {
             let inner = next.0;
             head = head.min(inner)
         }
-        let slice = std::ptr::slice_from_raw_parts_mut(head, capacity);
+        let layout = unsafe { Layout::from_size_align_unchecked(capacity, 64) };
         // SAFETY:
         // 1. All pointers are guaranteed to lie within the original backing store.
         // 2. The initial slice length has been accurately recalculated.
         // 3. The starting memory address is determined through wrap-around detection.
         // 4. This is a controlled reclamation of a previously leaked boxed slice.
-        let _ = unsafe { Box::from_raw(slice) };
+        unsafe { dealloc(head as *mut u8, layout) };
     }
 }
 

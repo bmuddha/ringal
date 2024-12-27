@@ -35,7 +35,7 @@ impl Header {
     #[inline(always)]
     pub(crate) fn available(&self) -> bool {
         let atomic = self.0 as *const AtomicUsize;
-        (unsafe { &*atomic }).load(Ordering::Relaxed) & 1 == 0
+        (unsafe { &*atomic }).load(Ordering::Acquire) & 1 == 0
     }
 
     /// distance (in `size_of<usize>()`) to given guard
@@ -84,6 +84,6 @@ impl Drop for Guard {
         // in the execution timeline. Importantly, the allocator is restricted from write access
         // the region until it is released.
         let atomic = self.0 as *mut usize as *const AtomicUsize;
-        unsafe { &*atomic }.fetch_and(usize::MAX << 1, Ordering::Release);
+        unsafe { &*atomic }.fetch_and(usize::MAX << 1, Ordering::Relaxed);
     }
 }

@@ -1,11 +1,16 @@
 use std::{
-    collections::VecDeque, io::Write, mem::transmute, sync::mpsc::sync_channel, time::Instant,
+    collections::VecDeque,
+    fmt::Debug,
+    io::Write,
+    mem::transmute,
+    sync::mpsc::sync_channel,
+    time::{Duration, Instant},
 };
 
 use crate::{
     buffer::FixedBuf,
     header::{Guard, Header},
-    RingAl, MINALLOC, USIZELEN,
+    RingAl, MINALLOC, USIZEALIGN, USIZELEN,
 };
 
 const SIZE: usize = 4096;
@@ -58,7 +63,7 @@ fn test_init() {
 fn test_alloc() {
     let (mut ringal, _g) = setup!();
     let start = ringal.head;
-    let header = ringal.alloc(1024);
+    let header = ringal.alloc(1024, USIZEALIGN);
     assert!(
         header.is_some(),
         "should be able to allocate with new allocator"
@@ -75,7 +80,7 @@ fn test_multi_alloc() {
     let mut allocations = Vec::<Guard>::with_capacity(COUNT);
     for i in 0..COUNT {
         let size = SIZE / COUNT - USIZELEN * 2 - (i == COUNT - 1) as usize * USIZELEN;
-        let header = ringal.alloc(size);
+        let header = ringal.alloc(size, USIZEALIGN);
         assert!(
             header.is_some(),
             "should have enough capacity for all allocations"
@@ -84,10 +89,10 @@ fn test_multi_alloc() {
         header.set();
         allocations.push(header.into());
     }
-    let header = ringal.alloc(SIZE / COUNT - USIZELEN);
+    let header = ringal.alloc(SIZE / COUNT - USIZELEN, USIZEALIGN);
     assert!(header.is_none(), "should have run out of capacity");
     allocations.clear();
-    let header = ringal.alloc(SIZE / COUNT - USIZELEN);
+    let header = ringal.alloc(SIZE / COUNT - USIZELEN, USIZEALIGN);
     assert!(
         header.is_some(),
         "should have all capacity after dropping allocations"
@@ -95,13 +100,13 @@ fn test_multi_alloc() {
 }
 
 #[test]
-fn test_continious_alloc() {
+fn test_continuous_alloc() {
     let (mut ringal, _g) = setup!();
     const ITERS: u64 = 8192;
     let mut allocations = VecDeque::<Guard>::with_capacity(4);
     for i in 0..ITERS {
-        let size = (unsafe { transmute::<Instant, (u64, u64)>(Instant::now()) }.0 * i) % 256;
-        let header = ringal.alloc(size as usize);
+        let size = (unsafe { transmute::<Instant, (u64, u32)>(Instant::now()) }.0 * i) % 256;
+        let header = ringal.alloc(size as usize, USIZEALIGN);
         assert!(header.is_some(), "should always have capacity");
         let header = header.unwrap();
         header.set();
@@ -172,7 +177,7 @@ fn test_ext_buf_continuous_alloc() {
     let mut buffers = VecDeque::with_capacity(4);
     const ITERS: usize = 8192;
     for i in 0..ITERS {
-        let random = unsafe { transmute::<Instant, (usize, usize)>(Instant::now()).0 };
+        let random = unsafe { transmute::<Instant, (usize, u32)>(Instant::now()).0 };
         let mut size = (random * i) % 256;
         if size < MINALLOC * USIZELEN {
             size = 256 - size
@@ -262,7 +267,7 @@ fn test_fixed_buf_continuous_alloc() {
     let mut buffers = VecDeque::with_capacity(4);
     const ITERS: usize = 8192;
     for i in 0..ITERS {
-        let random = unsafe { transmute::<Instant, (usize, usize)>(Instant::now()).0 };
+        let random = unsafe { transmute::<Instant, (usize, u32)>(Instant::now()).0 };
         let mut size = (random * i) % 256;
         if size < MINALLOC * USIZELEN {
             size = 256 - size
@@ -306,7 +311,7 @@ fn test_fixed_buf_continuous_alloc_multi_thread() {
         threads.push(tx);
     }
     for i in 0..ITERS {
-        let random = unsafe { transmute::<Instant, (usize, usize)>(Instant::now()).0 };
+        let random = unsafe { transmute::<Instant, (usize, u32)>(Instant::now()).0 };
         let mut size = (random * i) % 256;
         if size < MINALLOC * USIZELEN {
             size = 256 - size
@@ -362,4 +367,49 @@ fn test_thread_local_allocator() {
         assert_eq!(extended.unwrap().len(), MSGLEN);
     }
     some_fn();
+}
+
+//#[cfg(feature = "generic")]
+#[test]
+fn test_generic_buf() {
+    test_generic_buf_helper::<usize>(42);
+}
+
+#[test]
+fn test_generic_buf_double_word_align() {
+    test_generic_buf_helper::<u128>(42);
+}
+#[test]
+fn test_generic_buf_half_word_align() {
+    test_generic_buf_helper::<u32>(42);
+}
+
+fn test_generic_buf_helper<T: PartialEq + Eq + Debug + Copy + 'static>(int: T) {
+    let (mut ringal, _g) = setup!();
+    #[derive(PartialEq, Eq, Debug)]
+    struct SomeType<T> {
+        int: T,
+        string: String,
+    }
+    let string = "hello world".to_owned();
+    let instance = SomeType {
+        int,
+        string: string.clone(),
+    };
+    let buffer = ringal.generic::<SomeType<T>>(7);
+    assert!(
+        buffer.is_some(),
+        "should be able to allocate generic buf with new allocator"
+    );
+    let mut buffer = buffer.unwrap();
+    assert!(buffer.push(instance).is_none());
+    assert_eq!(buffer.pop(), Some(SomeType { int, string }));
+    impl<T> Drop for SomeType<T> {
+        fn drop(&mut self) {
+            println!("Dropping the value SomeType");
+        }
+    }
+    drop(buffer);
+    drop(ringal);
+    std::thread::sleep(Duration::from_millis(10));
 }

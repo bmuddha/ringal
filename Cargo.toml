@@ -17,3 +17,4 @@ edition = "2021"
 default = []
 drop = []
 tls = ["drop"]
+generic = []

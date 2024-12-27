@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     header::{Guard, Header},
-    RingAl,
+    RingAl, USIZEALIGN,
 };
 
 /// Extendable buffer. It dynamically grows to accomodate any extra data beyond the current
@@ -73,7 +73,7 @@ impl Write for ExtBuf<'_> {
             return Ok(count);
         }
         // extend the buffer with the missing capacity
-        let Some(header) = self.ringal.alloc(count - available) else {
+        let Some(header) = self.ringal.alloc(count - available, USIZEALIGN) else {
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
                 "allocator's capacity exhausted",
@@ -163,12 +163,14 @@ impl FixedBufMut {
 impl Deref for FixedBufMut {
     type Target = [u8];
 
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         unsafe { self.inner.get_unchecked(..self.initialized) }
     }
 }
 
 impl DerefMut for FixedBufMut {
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { self.inner.get_unchecked_mut(..self.initialized) }
     }
@@ -203,7 +205,114 @@ pub struct FixedBuf {
 impl Deref for FixedBuf {
     type Target = [u8];
 
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         self.inner
+    }
+}
+
+/// Mutable fixed buffer, with `Vec<T>` like API
+pub struct GenericBufMut<T: Sized + 'static> {
+    /// the lock release mechanism upon drop
+    pub(crate) _guard: Guard,
+    /// exclusively owned slice from backing store
+    /// properly aligned for T
+    pub(crate) inner: &'static mut [T],
+    /// current item count in buffer
+    pub(crate) initialized: usize,
+}
+
+impl<T> Deref for GenericBufMut<T> {
+    type Target = [T];
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.inner.get_unchecked(..self.initialized) }
+    }
+}
+
+impl<T> DerefMut for GenericBufMut<T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.inner.get_unchecked_mut(..self.initialized) }
+    }
+}
+
+// #[cfg(feature = "generic")]
+impl<T> GenericBufMut<T> {
+    pub fn capacity(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn push(&mut self, value: T) -> Option<T> {
+        if self.inner.len() == self.initialized {
+            return Some(value);
+        }
+        self.initialized += 1;
+        unsafe {
+            let cell = self.inner.get_unchecked_mut(self.initialized - 1) as *mut T;
+            std::ptr::write(cell, value);
+        }
+        None
+    }
+
+    pub fn insert(&mut self, mut value: T, mut index: usize) -> Option<T> {
+        if self.initialized < index {
+            return Some(value);
+        }
+        unsafe {
+            while index < self.initialized {
+                let cell = self.inner.get_unchecked_mut(index) as *mut T;
+                let temp = std::ptr::read(cell as *const T);
+                std::ptr::write(cell, value);
+                value = temp;
+                index += 1;
+            }
+        }
+        None
+    }
+
+    pub fn pop(&mut self) -> Option<T> {
+        (self.initialized != 0).then_some(())?;
+        let value = unsafe { self.inner.get_unchecked_mut(self.initialized - 1) };
+        let owned = unsafe { std::ptr::read(value as *const T) };
+        self.initialized -= 1;
+        Some(owned)
+    }
+
+    pub fn remove(&mut self, mut index: usize) -> Option<T> {
+        (self.initialized > index).then_some(())?;
+        if self.initialized - 1 == index {
+            return self.pop();
+        }
+        let mut value = unsafe { self.inner.get_unchecked_mut(index) } as *mut T;
+        let element = unsafe { std::ptr::read(value) };
+        while index < self.initialized {
+            index += 1;
+            let next = unsafe { self.inner.get_unchecked_mut(index) } as *mut T;
+            unsafe { std::ptr::write(value, std::ptr::read(next)) };
+            value = next;
+        }
+        self.initialized -= 1;
+        Some(element)
+    }
+
+    pub fn swap_remove(&mut self, index: usize) -> Option<T> {
+        (index < self.initialized).then_some(())?;
+        if self.initialized - 1 == index {
+            return self.pop();
+        }
+
+        // Swap the element at the given index with the last element
+        let element = unsafe {
+            let last = self.inner.get_unchecked_mut(self.initialized - 1) as *mut T;
+            let value = self.inner.get_unchecked_mut(index) as *mut T;
+            let element = std::ptr::read(value);
+            std::ptr::write(value, std::ptr::read(last));
+            element
+        };
+        self.initialized -= 1;
+
+        Some(element)
     }
 }
