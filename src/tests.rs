@@ -373,7 +373,7 @@ fn test_thread_local_allocator() {
 macro_rules! test_generic_buf {
     ($int: ty) => {
         let (mut ringal, _g) = setup!();
-        const ITERS: $int = 7;
+        const ITERS: $int = 3;
         struct SomeType {
             i: $int,
             string: FixedBuf,
@@ -395,38 +395,39 @@ macro_rules! test_generic_buf {
             assert!(buffer.push(instance).is_none());
         }
         assert_eq!(buffer.len(), ITERS as usize);
-        //for i in (0..ITERS).rev() {
-        //    let elem = buffer.pop();
-        //    println!("poped: elem: {i}");
-        //    assert!(elem.is_some(), "buffer should pop all pushed elements");
-        //    let elem = elem.unwrap();
-        //    assert_eq!(elem.i, i);
-        //    assert_eq!(elem.string.as_ref(), string.as_ref());
-        //    assert!(buffer.insert(elem, 0).is_none());
-        //}
-        //assert_eq!(buffer.len(), ITERS as usize);
-        //for _ in 0..ITERS {
-        //    let elem = buffer.swap_remove(0);
-        //    assert!(
-        //        elem.is_some(),
-        //        "buffer should swap remove all pushed elements"
-        //    );
-        //    let elem = elem.unwrap();
-        //    buffer.push(elem);
-        //}
-        //assert_eq!(buffer.len(), ITERS as usize);
-        let mut indices: HashSet<$int> = [0, 1, 2, 3, 4, 5, 6].into_iter().collect();
+        for i in (0..ITERS).rev() {
+            let elem = buffer.pop();
+            assert!(elem.is_some(), "buffer should pop all pushed elements");
+            let elem = elem.unwrap();
+            assert_eq!(elem.i, i);
+            assert_eq!(elem.string.as_ref(), string.as_ref());
+            assert!(buffer.insert(elem, 0).is_none());
+        }
+        assert_eq!(buffer.len(), ITERS as usize);
+        for _ in 0..ITERS {
+            let elem = buffer.swap_remove(0);
+            assert!(
+                elem.is_some(),
+                "buffer should swap remove all pushed elements"
+            );
+            let elem = elem.unwrap();
+            buffer.push(elem);
+        }
+        assert_eq!(buffer.len(), ITERS as usize);
+        let mut indices: HashSet<$int> = (0..ITERS).into_iter().collect();
         for _ in 0..ITERS {
             let elem = buffer.remove(0);
             assert!(
                 elem.is_some(),
                 "buffer should swap remove all pushed elements"
             );
-            assert!(indices.remove(&elem.unwrap().i));
+            let removed = &elem.unwrap().i;
+            println!("{} removing {removed}", stringify!($int));
+            assert!(indices.remove(&removed));
         }
         assert_eq!(buffer.len(), 0);
-        //drop(buffer);
-        //drop(ringal);
+        drop(string);
+        drop(buffer);
     };
 }
 

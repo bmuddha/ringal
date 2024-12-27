@@ -14,7 +14,7 @@ edition = "2021"
 [dependencies]
 
 [features]
-default = []
+default = ["generic"]
 drop = []
 tls = ["drop"]
 generic = []

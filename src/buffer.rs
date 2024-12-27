@@ -211,7 +211,8 @@ impl Deref for FixedBuf {
     }
 }
 
-/// Mutable fixed buffer, with `Vec<T>` like API
+/// Mutable fixed buffer, which is generic over its elements T, with `Vec<T>` like API
+#[cfg(feature = "generic")]
 pub struct GenericBufMut<T: Sized + 'static> {
     /// the lock release mechanism upon drop
     pub(crate) _guard: Guard,
@@ -222,104 +223,128 @@ pub struct GenericBufMut<T: Sized + 'static> {
     pub(crate) initialized: usize,
 }
 
-impl<T> Deref for GenericBufMut<T> {
-    type Target = [T];
+#[cfg(feature = "generic")]
+mod generic {
+    use super::{Deref, DerefMut, GenericBufMut};
 
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        unsafe { self.inner.get_unchecked(..self.initialized) }
-    }
-}
+    impl<T> Deref for GenericBufMut<T> {
+        type Target = [T];
 
-impl<T> DerefMut for GenericBufMut<T> {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.inner.get_unchecked_mut(..self.initialized) }
-    }
-}
-
-// #[cfg(feature = "generic")]
-impl<T> GenericBufMut<T> {
-    pub fn capacity(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn push(&mut self, value: T) -> Option<T> {
-        if self.inner.len() == self.initialized {
-            return Some(value);
+        #[inline(always)]
+        fn deref(&self) -> &Self::Target {
+            unsafe { self.inner.get_unchecked(..self.initialized) }
         }
-        self.initialized += 1;
-        unsafe {
-            let cell = self.inner.get_unchecked_mut(self.initialized - 1) as *mut T;
-            std::ptr::write(cell, value);
-        }
-        None
     }
 
-    pub fn insert(&mut self, mut value: T, mut index: usize) -> Option<T> {
-        if self.initialized < index {
-            return Some(value);
+    impl<T> DerefMut for GenericBufMut<T> {
+        #[inline(always)]
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            unsafe { self.inner.get_unchecked_mut(..self.initialized) }
         }
-        self.initialized += 1;
-        unsafe {
-            while index < self.initialized {
-                let cell = self.inner.get_unchecked_mut(index) as *mut T;
-                let temp = std::ptr::read(cell as *const T);
-                println!("wrting: {} to {:p}", index, cell);
+    }
+
+    impl<T> GenericBufMut<T> {
+        /// Returns the total capacity of the buffer, i.e., the number of elements it can hold.
+        pub fn capacity(&self) -> usize {
+            self.inner.len()
+        }
+
+        /// Pushes an element to the end of the buffer.
+        ///
+        /// If the buffer is full it returns the element as `Some(value)`. Otherwise, it returns `None`
+        /// after successfully adding the element to end. Operation is O(1)
+        pub fn push(&mut self, value: T) -> Option<T> {
+            if self.inner.len() == self.initialized {
+                return Some(value);
+            }
+            unsafe {
+                let cell = self.inner.get_unchecked_mut(self.initialized) as *mut T;
                 std::ptr::write(cell, value);
-                value = temp;
-                index += 1;
             }
+            self.initialized += 1;
+            None
         }
-        None
-    }
 
-    pub fn pop(&mut self) -> Option<T> {
-        (self.initialized != 0).then_some(())?;
-        let value = unsafe { self.inner.get_unchecked_mut(self.initialized - 1) };
-        let owned = unsafe { std::ptr::read(value as *const T) };
-        self.initialized -= 1;
-        Some(owned)
-    }
-
-    pub fn remove(&mut self, mut index: usize) -> Option<T> {
-        (self.initialized > index).then_some(())?;
-        if self.initialized - 1 == index {
-            return self.pop();
-        }
-        let mut value = unsafe { self.inner.get_unchecked_mut(index) } as *mut T;
-        let element = unsafe { std::ptr::read(value) };
-        self.initialized -= 1;
-        unsafe {
-            while index < self.initialized {
-                index += 1;
-                let next = self.inner.get_unchecked_mut(index) as *mut T;
-                {
-                    let next = std::ptr::read(next);
-                    std::ptr::write(value, next);
+        /// Inserts an element at the specified index in the buffer.
+        ///
+        /// If the index is greater than the number of initialized elements, the operation fails and
+        /// `value` is returned. Otherwise, it shifts elements to the right and inserts the new
+        /// element, returning `None`. This operation is O(N).
+        pub fn insert(&mut self, mut value: T, mut index: usize) -> Option<T> {
+            if self.initialized < index {
+                return Some(value);
+            }
+            self.initialized += 1;
+            unsafe {
+                while index < self.initialized {
+                    let cell = self.inner.get_unchecked_mut(index) as *mut T;
+                    let temp = std::ptr::read(cell as *const T);
+                    std::ptr::write(cell, value);
+                    value = temp;
+                    index += 1;
                 }
-                value = next;
             }
-        }
-        Some(element)
-    }
-
-    pub fn swap_remove(&mut self, index: usize) -> Option<T> {
-        (index < self.initialized).then_some(())?;
-        if self.initialized - 1 == index {
-            return self.pop();
+            std::mem::forget(value);
+            None
         }
 
-        // Swap the element at the given index with the last element
-        self.initialized -= 1;
-        let element = unsafe {
-            let last = self.inner.get_unchecked_mut(self.initialized) as *mut T;
-            let value = self.inner.get_unchecked_mut(index) as *mut T;
-            let element = std::ptr::read(value);
-            std::ptr::write(value, std::ptr::read(last));
-            element
-        };
+        /// Removes and returns the last element from the buffer.
+        ///
+        /// Returns `None` if the buffer is empty. The operation is O(1)
+        pub fn pop(&mut self) -> Option<T> {
+            (self.initialized != 0).then_some(())?;
+            self.initialized -= 1;
+            let value = unsafe { self.inner.get_unchecked_mut(self.initialized) };
+            let owned = unsafe { std::ptr::read(value as *const T) };
+            Some(owned)
+        }
 
-        Some(element)
+        /// Removes and returns the element at the specified index from the buffer.
+        ///
+        /// Shifts all elements following the index to the left to fill the gap.
+        /// Returns `None` if the index is out of bounds. The operation is O(N)
+        pub fn remove(&mut self, mut index: usize) -> Option<T> {
+            (self.initialized > index).then_some(())?;
+            if self.initialized - 1 == index {
+                return self.pop();
+            }
+            let mut value = unsafe { self.inner.get_unchecked_mut(index) } as *mut T;
+            let element = unsafe { std::ptr::read(value) };
+            self.initialized -= 1;
+            unsafe {
+                while index < self.initialized {
+                    index += 1;
+                    let next = self.inner.get_unchecked_mut(index) as *mut T;
+                    {
+                        let next = std::ptr::read(next);
+                        std::ptr::write(value, next);
+                    }
+                    value = next;
+                }
+            }
+            Some(element)
+        }
+
+        /// Tries to remove and return the element at the specified index, replacing
+        /// it with the last element. The operation is O(1)
+        pub fn swap_remove(&mut self, index: usize) -> Option<T> {
+            (index < self.initialized).then_some(())?;
+            if self.initialized - 1 == index {
+                return self.pop();
+            }
+
+            // Swap the element at the given index with the last element
+            self.initialized -= 1;
+            let element = unsafe {
+                let last = self.inner.get_unchecked_mut(self.initialized) as *mut T;
+                let value = self.inner.get_unchecked_mut(index) as *mut T;
+                let element = std::ptr::read(value);
+                let temp = std::ptr::read(last);
+                std::ptr::write(value, temp);
+                element
+            };
+
+            Some(element)
+        }
     }
 }
