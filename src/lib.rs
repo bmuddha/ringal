@@ -85,6 +85,22 @@
 //! tx.send(buffer);
 //! handle.join().unwrap();
 //! ```
+//! ### Generic buffers
+//! ```rust
+//! # use ringal::{ RingAl, GenericBufMut };
+//! # let mut allocator = RingAl::new(1024); // Create an allocator with initial size
+//!
+//! struct MyType {
+//!     field1: usize,
+//!     field2: u128
+//! }
+//! let mut buffer = allocator.generic::<MyType>(16).unwrap();
+//! buffer.push(MyType { field1: 42, field2: 43 });
+//! assert_eq!(buffer.len(), 1);
+//! let t = buffer.pop().unwrap();
+//! assert_eq!(t.field1, 42);
+//! assert_eq!(t.field2, 43);
+//! ```
 //!
 //! ### Thread Local Storage
 //! ```rust
@@ -107,16 +123,16 @@
 //! println!("bytes written: {}", fixed.len());
 //! ```
 //!
+//!
 //! ## Safety Considerations
 //!
 //! While `unsafe` code is used for performance reasons, the public API is designed to be safe.
 //! Significant efforts have been made to ensure no undefined behavior occurs, offering a safe
 //! experience for end-users.
 
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{alloc, Layout};
 
-use buffer::GenericBufMut;
-pub use buffer::{ExtBuf, FixedBuf, FixedBufMut};
+pub use buffer::{ExtBuf, FixedBuf, FixedBufMut, GenericBufMut};
 use header::Header;
 
 /// Ring Allocator, see crate level documentation on features and usage
@@ -350,7 +366,7 @@ impl Drop for RingAl {
         // 2. The initial slice length has been accurately recalculated.
         // 3. The starting memory address is determined through wrap-around detection.
         // 4. This is a controlled reclamation of a previously leaked boxed slice.
-        unsafe { dealloc(head as *mut u8, layout) };
+        unsafe { std::alloc::dealloc(head as *mut u8, layout) };
     }
 }
 
