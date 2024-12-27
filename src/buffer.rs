@@ -260,10 +260,12 @@ impl<T> GenericBufMut<T> {
         if self.initialized < index {
             return Some(value);
         }
+        self.initialized += 1;
         unsafe {
             while index < self.initialized {
                 let cell = self.inner.get_unchecked_mut(index) as *mut T;
                 let temp = std::ptr::read(cell as *const T);
+                println!("wrting: {} to {:p}", index, cell);
                 std::ptr::write(cell, value);
                 value = temp;
                 index += 1;
@@ -287,13 +289,18 @@ impl<T> GenericBufMut<T> {
         }
         let mut value = unsafe { self.inner.get_unchecked_mut(index) } as *mut T;
         let element = unsafe { std::ptr::read(value) };
-        while index < self.initialized {
-            index += 1;
-            let next = unsafe { self.inner.get_unchecked_mut(index) } as *mut T;
-            unsafe { std::ptr::write(value, std::ptr::read(next)) };
-            value = next;
-        }
         self.initialized -= 1;
+        unsafe {
+            while index < self.initialized {
+                index += 1;
+                let next = self.inner.get_unchecked_mut(index) as *mut T;
+                {
+                    let next = std::ptr::read(next);
+                    std::ptr::write(value, next);
+                }
+                value = next;
+            }
+        }
         Some(element)
     }
 
@@ -304,14 +311,14 @@ impl<T> GenericBufMut<T> {
         }
 
         // Swap the element at the given index with the last element
+        self.initialized -= 1;
         let element = unsafe {
-            let last = self.inner.get_unchecked_mut(self.initialized - 1) as *mut T;
+            let last = self.inner.get_unchecked_mut(self.initialized) as *mut T;
             let value = self.inner.get_unchecked_mut(index) as *mut T;
             let element = std::ptr::read(value);
             std::ptr::write(value, std::ptr::read(last));
             element
         };
-        self.initialized -= 1;
 
         Some(element)
     }

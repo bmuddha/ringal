@@ -1,10 +1,11 @@
+#![allow(unused)]
+
 use std::{
-    collections::VecDeque,
-    fmt::Debug,
+    collections::{HashSet, VecDeque},
     io::Write,
     mem::transmute,
     sync::mpsc::sync_channel,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use crate::{
@@ -369,47 +370,87 @@ fn test_thread_local_allocator() {
     some_fn();
 }
 
+macro_rules! test_generic_buf {
+    ($int: ty) => {
+        let (mut ringal, _g) = setup!();
+        const ITERS: $int = 7;
+        struct SomeType {
+            i: $int,
+            string: FixedBuf,
+        }
+        let mut string = ringal.fixed(64).unwrap();
+        let _ = string.write(b"hello world").unwrap();
+        let string = string.freeze();
+        let buffer = ringal.generic::<SomeType>(ITERS as usize);
+        assert!(
+            buffer.is_some(),
+            "should be able to allocate generic buf with new allocator"
+        );
+        let mut buffer = buffer.unwrap();
+        for i in 0..ITERS {
+            let instance = SomeType {
+                i,
+                string: string.clone(),
+            };
+            assert!(buffer.push(instance).is_none());
+        }
+        assert_eq!(buffer.len(), ITERS as usize);
+        //for i in (0..ITERS).rev() {
+        //    let elem = buffer.pop();
+        //    println!("poped: elem: {i}");
+        //    assert!(elem.is_some(), "buffer should pop all pushed elements");
+        //    let elem = elem.unwrap();
+        //    assert_eq!(elem.i, i);
+        //    assert_eq!(elem.string.as_ref(), string.as_ref());
+        //    assert!(buffer.insert(elem, 0).is_none());
+        //}
+        //assert_eq!(buffer.len(), ITERS as usize);
+        //for _ in 0..ITERS {
+        //    let elem = buffer.swap_remove(0);
+        //    assert!(
+        //        elem.is_some(),
+        //        "buffer should swap remove all pushed elements"
+        //    );
+        //    let elem = elem.unwrap();
+        //    buffer.push(elem);
+        //}
+        //assert_eq!(buffer.len(), ITERS as usize);
+        let mut indices: HashSet<$int> = [0, 1, 2, 3, 4, 5, 6].into_iter().collect();
+        for _ in 0..ITERS {
+            let elem = buffer.remove(0);
+            assert!(
+                elem.is_some(),
+                "buffer should swap remove all pushed elements"
+            );
+            assert!(indices.remove(&elem.unwrap().i));
+        }
+        assert_eq!(buffer.len(), 0);
+        //drop(buffer);
+        //drop(ringal);
+    };
+}
+
 //#[cfg(feature = "generic")]
 #[test]
-fn test_generic_buf() {
-    test_generic_buf_helper::<usize>(42);
+fn test_generic_buf_word() {
+    test_generic_buf!(usize);
 }
 
 #[test]
 fn test_generic_buf_double_word_align() {
-    test_generic_buf_helper::<u128>(42);
+    test_generic_buf!(u128);
 }
 #[test]
 fn test_generic_buf_half_word_align() {
-    test_generic_buf_helper::<u32>(42);
+    test_generic_buf!(u32);
 }
 
-fn test_generic_buf_helper<T: PartialEq + Eq + Debug + Copy + 'static>(int: T) {
-    let (mut ringal, _g) = setup!();
-    #[derive(PartialEq, Eq, Debug)]
-    struct SomeType<T> {
-        int: T,
-        string: String,
-    }
-    let string = "hello world".to_owned();
-    let instance = SomeType {
-        int,
-        string: string.clone(),
-    };
-    let buffer = ringal.generic::<SomeType<T>>(7);
-    assert!(
-        buffer.is_some(),
-        "should be able to allocate generic buf with new allocator"
-    );
-    let mut buffer = buffer.unwrap();
-    assert!(buffer.push(instance).is_none());
-    assert_eq!(buffer.pop(), Some(SomeType { int, string }));
-    impl<T> Drop for SomeType<T> {
-        fn drop(&mut self) {
-            println!("Dropping the value SomeType");
-        }
-    }
-    drop(buffer);
-    drop(ringal);
-    std::thread::sleep(Duration::from_millis(10));
+#[test]
+fn test_generic_buf_quarter_word_align() {
+    test_generic_buf!(u16);
+}
+
+#[test]
+fn test_generic_buf_eighth_word_align() {
+    test_generic_buf!(u8);
 }
