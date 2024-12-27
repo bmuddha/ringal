@@ -97,7 +97,7 @@ impl Write for ExtBuf<'_> {
             // wrap around adjustment of pointer
             self.header = header;
             // lock the new memory region
-            self.header.set();
+            self.header.lock();
             self.initialized = 0;
             // copy existing data from tail to new memory region
             let _ = self.write(old)?;

@@ -164,7 +164,7 @@ impl RingAl {
     ///
     /// NOTE: not entire capacity will be available for allocation due to guard headers being part
     /// of allocations and taking up space as well
-    pub fn new_with_align(mut size: usize, align: usize) -> Self {
+    fn new_with_align(mut size: usize, align: usize) -> Self {
         assert!(size > USIZELEN && size < usize::MAX >> 1 && align.is_power_of_two());
         size = size.next_power_of_two();
         let inner = unsafe { alloc(Layout::from_size_align_unchecked(size, align)) };
@@ -188,7 +188,7 @@ impl RingAl {
     #[inline(always)]
     pub fn fixed(&mut self, size: usize) -> Option<FixedBufMut> {
         let header = self.alloc(size, USIZEALIGN)?;
-        header.set();
+        header.lock();
         let ptr = header.buffer();
         let capacity = header.capacity();
         let inner = unsafe { std::slice::from_raw_parts_mut(ptr, capacity) };
@@ -208,7 +208,7 @@ impl RingAl {
     /// prevents any further allocations while this buffer is around
     pub fn extendable(&mut self, size: usize) -> Option<ExtBuf<'_>> {
         let header = self.alloc(size, USIZEALIGN)?;
-        header.set();
+        header.lock();
         Some(ExtBuf {
             header,
             initialized: 0,
@@ -222,7 +222,7 @@ impl RingAl {
         let tsize = size_of::<T>();
         let size = count * tsize;
         let header = self.alloc(size, align_of::<T>())?;
-        header.set();
+        header.lock();
         let buffer = header.buffer();
         let offset = buffer.align_offset(align_of::<T>());
         let inner = unsafe { buffer.add(offset) } as *mut T;
@@ -340,7 +340,7 @@ impl Drop for RingAl {
         loop {
             // Busy wait until the current allocation is marked as available
             if !next.available() {
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
             // Reconstruct the original capacity used for the backing store
@@ -360,7 +360,7 @@ impl Drop for RingAl {
             let inner = next.0;
             head = head.min(inner)
         }
-        let layout = unsafe { Layout::from_size_align_unchecked(capacity, 64) };
+        let layout = unsafe { Layout::from_size_align_unchecked(capacity, DEFAULT_ALIGNMENT) };
         // SAFETY:
         // 1. All pointers are guaranteed to lie within the original backing store.
         // 2. The initial slice length has been accurately recalculated.

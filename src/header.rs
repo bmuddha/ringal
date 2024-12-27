@@ -7,13 +7,13 @@ use crate::USIZELEN;
 pub(crate) struct Header(pub(crate) *mut usize);
 /// Allocation guard, used through its Drop implementation, which
 /// unlocks (releases) the memory region back to allocator
-pub(crate) struct Guard(&'static mut usize);
+pub(crate) struct Guard(&'static AtomicUsize);
 
 impl Header {
     /// lock the memory region, preventing allocator
     /// from reusing it until it's unlocked
     #[inline(always)]
-    pub(crate) fn set(&self) {
+    pub(crate) fn lock(&self) {
         unsafe { *self.0 |= 1 }
     }
 
@@ -35,7 +35,7 @@ impl Header {
     #[inline(always)]
     pub(crate) fn available(&self) -> bool {
         let atomic = self.0 as *const AtomicUsize;
-        (unsafe { &*atomic }).load(Ordering::Acquire) & 1 == 0
+        (unsafe { &*atomic }).load(Ordering::Relaxed) & 1 == 0
     }
 
     /// distance (in `size_of<usize>()`) to given guard
@@ -64,7 +64,7 @@ impl Header {
 impl From<Header> for Guard {
     #[inline(always)]
     fn from(value: Header) -> Self {
-        Self(unsafe { &mut *value.0 })
+        Self(unsafe { &*(value.0 as *const AtomicUsize) })
     }
 }
 
@@ -83,7 +83,6 @@ impl Drop for Guard {
         // The caller of `drop` is the sole entity capable of writing to the region at this point
         // in the execution timeline. Importantly, the allocator is restricted from write access
         // the region until it is released.
-        let atomic = self.0 as *mut usize as *const AtomicUsize;
-        unsafe { &*atomic }.fetch_and(usize::MAX << 1, Ordering::Relaxed);
+        self.0.fetch_and(usize::MAX << 1, Ordering::Relaxed);
     }
 }
