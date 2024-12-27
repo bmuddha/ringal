@@ -5,7 +5,7 @@ use std::{
     io::Write,
     mem::transmute,
     sync::mpsc::sync_channel,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -87,7 +87,7 @@ fn test_multi_alloc() {
             "should have enough capacity for all allocations"
         );
         let header = header.unwrap();
-        header.set();
+        header.lock();
         allocations.push(header.into());
     }
     let header = ringal.alloc(SIZE / COUNT - USIZELEN, USIZEALIGN);
@@ -110,7 +110,7 @@ fn test_continuous_alloc() {
         let header = ringal.alloc(size as usize, USIZEALIGN);
         assert!(header.is_some(), "should always have capacity");
         let header = header.unwrap();
-        header.set();
+        header.lock();
         allocations.push_back(header.into());
         if allocations.len() == 4 {
             allocations.pop_front();
@@ -299,10 +299,11 @@ fn test_fixed_buf_continuous_alloc_multi_thread() {
     let (mut ringal, _g) = setup!();
     let mut string = Vec::<u8>::new();
     let mut threads = Vec::with_capacity(4);
+    let mut handles = Vec::with_capacity(4);
     const ITERS: usize = 8192;
     for i in 0..4 {
         let (tx, rx) = sync_channel::<FixedBuf>(2);
-        std::thread::spawn(move || {
+        let h = std::thread::spawn(move || {
             let mut number = 0;
             while let Ok(s) = rx.recv() {
                 number += s.len() * i;
@@ -310,6 +311,7 @@ fn test_fixed_buf_continuous_alloc_multi_thread() {
             number
         });
         threads.push(tx);
+        handles.push(h);
     }
     for i in 0..ITERS {
         let random = unsafe { transmute::<Instant, (usize, u32)>(Instant::now()).0 };
@@ -334,6 +336,10 @@ fn test_fixed_buf_continuous_alloc_multi_thread() {
         for tx in &mut threads {
             tx.send(buffer.clone()).unwrap();
         }
+    }
+    drop(threads);
+    for h in handles {
+        let _ = h.join();
     }
 }
 
@@ -422,7 +428,6 @@ macro_rules! test_generic_buf {
                 "buffer should swap remove all pushed elements"
             );
             let removed = &elem.unwrap().i;
-            println!("{} removing {removed}", stringify!($int));
             assert!(indices.remove(&removed));
         }
         assert_eq!(buffer.len(), 0);
